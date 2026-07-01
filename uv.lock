@@ -115,6 +115,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "fastobo" },
     { name = "pyarrow" },
+    { name = "rich" },
     { name = "typer" },
 ]
 
@@ -129,6 +130,7 @@ requires-dist = [
     { name = "fastobo", specifier = ">=0.13" },
     { name = "pyarrow", specifier = ">=17" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "rich", specifier = ">=13" },
     { name = "typer", specifier = ">=0.12" },
 ]
 provides-extras = ["dev"]

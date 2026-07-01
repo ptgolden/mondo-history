@@ -11,11 +11,31 @@ the original vision.
 
 ## Status
 
-Early development. Currently implemented:
+Early development — the end-to-end pipeline works on a slice of history:
 
-- `gitsource` — builds a file-scoped, blob-filtered clone of Mondo and walks the
-  history of a single file (`src/ontology/mondo-edit.obo`), yielding each version's
-  bytes without downloading the rest of the repository.
+- `gitsource` — file-scoped, blob-filtered clone + single-file history walk,
+  following renames, reading blob content by OID.
+- `obo` — normalize term frames to canonical clause sets (via fastobo) and diff
+  adjacent versions clause-by-clause.
+- `extract` / `model` — stream the diff into a Parquet artifact
+  (`commits`, `term_snapshots`, `events`, `build_meta`).
+- `query` / `cli` — DuckDB-backed queries rendered with `rich`.
+
+## Try it
+
+```sh
+uv sync --extra dev
+
+# Build an artifact from a recent slice of a local Mondo clone.
+uv run mondo-history build --repo ../mondo --out artifact --limit 25
+
+# A term's change history (optionally one clause kind), a point-in-time state,
+# and everything that changed together in a commit.
+uv run mondo-history term MONDO:0012350
+uv run mondo-history term MONDO:0012350 --only synonym
+uv run mondo-history term MONDO:0000002 --at 169
+uv run mondo-history commit 1ac4db2
+```
 
 ## Development
 
