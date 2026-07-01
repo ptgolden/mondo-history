@@ -75,6 +75,7 @@ def obo_repo(tmp_path: Path) -> Path:
     _write(repo, "src/onto.obo", HEADER + t1_v3)
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "c3 add xref", date="2021-01-04T00:00:00+00:00")
+    _git(repo, "tag", "v1.0")  # release tag on c3
 
     t2 = _term("MONDO:0000002", "name: cancer")
     _write(repo, "src/onto.obo", HEADER + t1_v3 + "\n" + t2)

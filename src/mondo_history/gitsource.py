@@ -41,6 +41,15 @@ class CommitInfo:
 
 
 @dataclass(frozen=True)
+class TagRef:
+    """A git tag resolved to the commit it points at."""
+
+    name: str
+    sha: str  # commit the tag dereferences to
+    date: datetime  # that commit's committer date, timezone-aware
+
+
+@dataclass(frozen=True)
 class FileVersion:
     """One version of the followed file, as it existed at a single commit."""
 
@@ -140,6 +149,26 @@ class GitSource:
                 blob_oid=blob_oid,
             )
             seq += 1
+
+    def read_tags(self) -> list[TagRef]:
+        """All tags, each dereferenced to its target commit and that commit's date.
+
+        Works for both lightweight and annotated tags (``^{commit}`` derefs the
+        annotated case). Tags outside a shallow clone's range simply aren't here.
+        """
+        names = _run(
+            ["git", "for-each-ref", "--format=%(refname:short)", "refs/tags"],
+            cwd=self.repo_dir,
+        ).split()
+        tags: list[TagRef] = []
+        for name in names:
+            info = _run(
+                ["git", "log", "-1", f"--format=%H{_FIELD}%aI", f"{name}^{{commit}}"],
+                cwd=self.repo_dir,
+            ).strip()
+            sha, _, date = info.partition(_FIELD)
+            tags.append(TagRef(name=name, sha=sha, date=datetime.fromisoformat(date)))
+        return tags
 
     def read_blob(self, blob_oid: str) -> bytes:
         """Return the raw bytes of a blob, fetching it from the promisor if needed."""

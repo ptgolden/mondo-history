@@ -26,7 +26,11 @@ Early development — the end-to-end pipeline works on a slice of history:
 ```sh
 uv sync --extra dev
 
-# Build an artifact from a recent slice of a local Mondo clone.
+# Build an artifact from a recent slice of Mondo, cloning it blob-filtered.
+# (Only the history of mondo-edit.obo is downloaded, lazily.)
+uv run mondo-history build --out artifact --since 2026-06-01
+
+# ...or reuse an existing local clone instead of cloning:
 uv run mondo-history build --repo ../mondo --out artifact --limit 25
 
 # A term's change history (optionally one clause kind), a point-in-time state,
@@ -35,6 +39,11 @@ uv run mondo-history term MONDO:0012350
 uv run mondo-history term MONDO:0012350 --only synonym
 uv run mondo-history term MONDO:0000002 --at 169
 uv run mondo-history commit 1ac4db2
+
+# Release-oriented views: list releases, a PR's terms, or a range diff.
+uv run mondo-history releases
+uv run mondo-history pr 10400
+uv run mondo-history diff v2026-06-02 HEAD --term MONDO:0001213
 ```
 
 ## Development

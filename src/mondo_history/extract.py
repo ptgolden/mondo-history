@@ -19,7 +19,7 @@ from datetime import timezone
 from pathlib import Path
 
 from . import model
-from .gitsource import CommitInfo, FileVersion, GitSource
+from .gitsource import CommitInfo, FileVersion, GitSource, TagRef
 from .obo import Clause, TermState, clause_delta, parse_terms
 
 _PR = re.compile(r"\(#(\d+)\)")
@@ -37,7 +37,7 @@ def extract(
     versions = list(src.iter_file_history(path))
     if limit is not None:
         versions = versions[-limit:]
-    return build(versions, src.read_blob, out_dir, source_path=path)
+    return build(versions, src.read_blob, out_dir, source_path=path, tags=src.read_tags())
 
 
 def build(
@@ -46,6 +46,7 @@ def build(
     out_dir: Path,
     *,
     source_path: str,
+    tags: Iterable[TagRef] = (),
 ) -> dict[str, int]:
     commits: list[dict] = []
     snapshots: list[dict] = []
@@ -53,10 +54,13 @@ def build(
 
     prev: dict[str, TermState] = {}
     seqs: list[int] = []
+    seq_dates: list[tuple[int, object]] = []  # (seq, naive-UTC date) for tag mapping
     for i, version in enumerate(versions):
         current = parse_terms(read_blob(version.blob_oid))
-        commits.append(_commit_row(version.commit))
+        row = _commit_row(version.commit)
+        commits.append(row)
         seqs.append(version.commit.seq)
+        seq_dates.append((version.commit.seq, row["committed_date"]))
 
         if i == 0:
             for term in current.values():
@@ -89,12 +93,45 @@ def build(
         }
     ]
 
+    releases = _release_rows(tags, seq_dates)
+
     model.write_table(commits, model.COMMITS, out_dir, "commits")
     model.write_table(snapshots, model.TERM_SNAPSHOTS, out_dir, "term_snapshots")
     model.write_table(events, model.EVENTS, out_dir, "events")
+    model.write_table(releases, model.RELEASES, out_dir, "releases")
     model.write_table(meta, model.BUILD_META, out_dir, "build_meta")
 
-    return {"commits": len(commits), "snapshots": len(snapshots), "events": len(events)}
+    return {
+        "commits": len(commits),
+        "snapshots": len(snapshots),
+        "events": len(events),
+        "releases": len(releases),
+    }
+
+
+def _release_rows(
+    tags: Iterable[TagRef], seq_dates: list[tuple[int, object]]
+) -> list[dict]:
+    """Map each tag to the latest file-history commit at or before its date.
+
+    A release's file state is whatever the last commit touching the file left it
+    as of the tag; tags predating the window map to no commit and are dropped.
+    """
+    rows: list[dict] = []
+    for tag in tags:
+        tag_date = tag.date.astimezone(timezone.utc).replace(tzinfo=None)
+        seq = None
+        for candidate_seq, date in seq_dates:
+            if date <= tag_date:
+                seq = candidate_seq
+            else:
+                break
+        if seq is None:
+            continue
+        rows.append(
+            {"tag": tag.name, "sha": tag.sha, "date": tag_date, "commit_seq": seq}
+        )
+    return rows
 
 
 def _commit_row(commit: CommitInfo) -> dict:

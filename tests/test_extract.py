@@ -71,6 +71,45 @@ def test_pr_number_parsed_from_message(artifact: Path):
     assert pr == 42
 
 
+def test_releases_map_tag_to_commit(artifact: Path):
+    db = HistoryDB(artifact)
+    rels = db.releases()
+    db.close()
+    # v1.0 was tagged on c3 (commit_seq 3).
+    assert [(tag, seq) for tag, seq, _date in rels] == [("v1.0", 3)]
+
+
+def test_diff_between_release_and_head(artifact: Path):
+    db = HistoryDB(artifact)
+    # Between v1.0 (seq 3) and HEAD (seq 4): only the new term created at c4.
+    rows = db.changes_between("v1.0", "4")
+    db.close()
+    assert [(r[0], r[1], r[2]) for r in rows] == [("MONDO:0000002", "add", "name")]
+
+
+def test_diff_resolves_sha_and_seq_symmetrically(artifact: Path):
+    db = HistoryDB(artifact)
+    a = db.changes_between("3", "4")
+    b = db.changes_between("4", "3")  # order shouldn't matter
+    db.close()
+    assert a == b
+
+
+def test_diff_accepts_head(artifact: Path):
+    db = HistoryDB(artifact)
+    by_head = db.changes_between("v1.0", "HEAD")
+    by_seq = db.changes_between("v1.0", "4")
+    db.close()
+    assert by_head == by_seq
+
+
+def test_pr_terms_from_message(artifact: Path):
+    db = HistoryDB(artifact)
+    # c2 "c2 rename (#42)" is a pure rename → no term events → PR touches nothing.
+    assert db.pr_terms(42) == []
+    db.close()
+
+
 def test_commit_terms_lists_co_changed(artifact: Path):
     db = HistoryDB(artifact)
     # find c4's sha, then ask what changed in it.

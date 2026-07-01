@@ -98,6 +98,73 @@ def commit(
     db.close()
 
 
+@app.command()
+def pr(
+    number: int = typer.Argument(..., help="Pull request number, e.g. 10343."),
+    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+):
+    """List the terms changed by a pull request."""
+    db = HistoryDB(artifact)
+    terms = db.pr_terms(number)
+    if not terms:
+        console.print(f"[yellow]No indexed changes for PR[/] #{number}")
+    else:
+        console.print(f"[bold]{len(terms)}[/] terms changed in PR #{number}:")
+        for mondo_id, name in terms:
+            line = Text("  ")
+            line.append(mondo_id, style="cyan")
+            if name:
+                line.append(f"  {name}", style="dim")
+            console.print(line)
+    db.close()
+
+
+@app.command()
+def diff(
+    ref_a: str = typer.Argument(..., help="Release tag, commit_seq, or sha."),
+    ref_b: str = typer.Argument(..., help="Release tag, commit_seq, or sha."),
+    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    term: Optional[str] = typer.Option(None, help="Restrict to one term."),
+):
+    """Show clause changes between two points (e.g. two releases)."""
+    db = HistoryDB(artifact)
+    rows = db.changes_between(ref_a, ref_b, mondo_id=term)
+    if not rows:
+        console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
+        db.close()
+        return
+    n_terms = len({r[0] for r in rows})
+    console.print(
+        f"[bold]{len(rows)}[/] changes across [bold]{n_terms}[/] terms "
+        f"between {ref_a} and {ref_b}:"
+    )
+    for mondo_id, group in groupby(rows, key=lambda r: r[0]):
+        console.print(Text(mondo_id, style="bold cyan"))
+        for _, operation, predicate, value, _seq, _pr in group:
+            line = Text("    ")
+            line.append("+ " if operation == "add" else "- ",
+                        style="bold green" if operation == "add" else "bold red")
+            line.append(f"{predicate}: {value}")
+            console.print(line)
+    db.close()
+
+
+@app.command()
+def releases(artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory.")):
+    """List release tags indexed in this artifact."""
+    db = HistoryDB(artifact)
+    rows = db.releases()
+    db.close()
+    if not rows:
+        console.print("[yellow]No releases indexed in this artifact.[/]")
+        return
+    for tag, commit_seq, date in rows:
+        line = Text()
+        line.append(tag, style="bold green")
+        line.append(f"  commit {commit_seq}  {str(date)[:10]}", style="dim")
+        console.print(line)
+
+
 def _render_timeline(mondo_id: str, changes: list[Change]) -> None:
     if not changes:
         console.print(f"[yellow]No history for[/] {mondo_id}")

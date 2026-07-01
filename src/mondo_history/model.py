@@ -58,6 +58,15 @@ EVENTS = pa.schema(
     ]
 )
 
+RELEASES = pa.schema(
+    [
+        ("tag", pa.string()),
+        ("sha", pa.string()),
+        ("date", pa.timestamp("us")),  # naive UTC
+        ("commit_seq", pa.int32()),  # file-history commit at/before the tag
+    ]
+)
+
 BUILD_META = pa.schema(
     [
         ("schema_version", pa.string()),
@@ -74,6 +83,7 @@ FILES = {
     "commits": COMMITS,
     "term_snapshots": TERM_SNAPSHOTS,
     "events": EVENTS,
+    "releases": RELEASES,
     "build_meta": BUILD_META,
 }
 
