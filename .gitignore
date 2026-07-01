@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Build inputs & outputs (never commit clones or generated artifacts)
+/mondo-clone/
+/artifact/
+*.parquet
+*.duckdb
+
+# Editor / OS
+.DS_Store
