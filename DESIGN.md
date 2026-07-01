@@ -187,10 +187,14 @@ tests/
 - `obo` — fastobo normalization (single-threaded parse, `threads=1`), canonical
   clause sets, content hashing, clause diffing.
 - `extract` — single-threaded `build()` (full-parse reference) and a **parallel,
-  streaming `build_parallel()`**: contiguous chunks across spawned worker
-  processes, each seeded by the previous chunk's last commit; Parquet
-  **part-files** flushed periodically to bound memory; output dirs cleared first
-  so re-runs don't accumulate stale files.
+  streaming `build_parallel()`**: the commit range is split into **more chunks
+  than workers** (default ~4/worker, tunable via `--chunk-size`) and dispatched
+  dynamically by the process pool, so a worker that finishes a light chunk grabs
+  the next queued one instead of idling (the earlier tail-latency issue). Each
+  chunk is seeded by the previous chunk's last commit — a one-parse cost that
+  bounds how small chunks can usefully get. Parquet **part-files** are flushed
+  periodically to bound memory; output dirs are cleared first so re-runs don't
+  accumulate stale files.
   - **Diff-scoped parsing:** rather than fastobo-parsing all ~45 MB each commit,
     a worker splits the file into stanzas by text (cheap), hashes each, and hands
     fastobo *only the stanzas whose bytes changed*, carrying unchanged term state

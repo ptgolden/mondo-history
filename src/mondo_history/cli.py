@@ -47,6 +47,10 @@ def build(
     jobs: int = typer.Option(
         0, help="Parser processes: 0 = auto (cores-2), 1 = single-threaded, N = that many."
     ),
+    chunk_size: int = typer.Option(
+        0, help="Commits per chunk (0 = auto, ~4 chunks/worker). Smaller = better "
+        "load balancing but more per-chunk seed-parse overhead."
+    ),
     progress: bool = typer.Option(True, help="Show a per-commit progress bar (parallel builds)."),
 ):
     """Extract history into a Parquet artifact, cloning Mondo if needed."""
@@ -56,7 +60,8 @@ def build(
             counts = run_extract(src, path, out, limit=limit)
     else:
         counts = build_parallel(
-            clone_path, path, out, jobs=(jobs or None), limit=limit, progress=progress
+            clone_path, path, out, jobs=(jobs or None),
+            chunk_size=(chunk_size or None), limit=limit, progress=progress,
         )
     msg = (
         f"[green]Built[/] {out} — {counts['commits']} commits, "

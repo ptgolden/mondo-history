@@ -213,6 +213,7 @@ def build_parallel(
     out_dir: Path,
     *,
     jobs: int | None = None,
+    chunk_size: int | None = None,
     limit: int | None = None,
     progress: bool = False,
 ) -> dict:
@@ -244,7 +245,14 @@ def build_parallel(
     windowed = full[offset:]
     n = len(windowed)
     jobs = jobs or max(1, (os.cpu_count() or 2) - 2)
-    bounds = _chunk_bounds(n, jobs)
+    # More chunks than workers so the pool can load-balance dynamically (a worker
+    # that finishes grabs the next queued chunk). Each chunk pays a one-parse seed
+    # cost, so default to a handful per worker rather than one-per-commit.
+    if chunk_size and chunk_size > 0:
+        n_chunks = -(-n // chunk_size)  # ceil
+    else:
+        n_chunks = jobs * 4
+    bounds = _chunk_bounds(n, max(1, min(n_chunks, n or 1)))
 
     # Parent-written tables (derived from commit metadata alone).
     commit_rows = [_commit_row(v.commit) for v in windowed]

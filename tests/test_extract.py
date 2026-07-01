@@ -44,6 +44,21 @@ def test_parallel_build_matches_single(obo_repo: Path, tmp_path: Path):
     dp.close()
 
 
+def test_chunk_size_does_not_change_output(obo_repo: Path, tmp_path: Path):
+    # Many tiny chunks (seed at every boundary) must match the single-threaded build.
+    single = tmp_path / "single"
+    many = tmp_path / "many"
+    with GitSource(obo_repo) as src:
+        extract(src, OBO, single)
+    build_parallel(str(obo_repo), OBO, many, jobs=2, chunk_size=1)
+
+    ds, dm = HistoryDB(single), HistoryDB(many)
+    cols = "mondo_id, commit_seq, operation, predicate, value"
+    assert _multiset(ds, "events", cols) == _multiset(dm, "events", cols)
+    ds.close()
+    dm.close()
+
+
 def test_parallel_rebuild_clears_stale_partfiles(obo_repo: Path, tmp_path: Path):
     # Re-running into the same dir must not accumulate/duplicate rows.
     out = tmp_path / "art"
