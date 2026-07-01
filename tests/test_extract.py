@@ -5,7 +5,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from mondo_history.extract import extract
+from mondo_history.extract import build_parallel, extract
 from mondo_history.gitsource import GitSource
 from mondo_history.query import HistoryDB
 
@@ -18,6 +18,44 @@ def artifact(obo_repo: Path, tmp_path: Path) -> Path:
     with GitSource(obo_repo) as src:
         extract(src, OBO, out)
     return out
+
+
+def _multiset(db: HistoryDB, table: str, cols: str):
+    return sorted(
+        db.con.execute(f"SELECT {cols} FROM {table}").fetchall()
+    )
+
+
+def test_parallel_build_matches_single(obo_repo: Path, tmp_path: Path):
+    # Same history built single-threaded vs with multiple worker processes must
+    # produce identical events and snapshots (chunk seeding + no stale files).
+    single = tmp_path / "single"
+    parallel = tmp_path / "parallel"
+    with GitSource(obo_repo) as src:
+        extract(src, OBO, single)
+    build_parallel(str(obo_repo), OBO, parallel, jobs=3)
+
+    ds, dp = HistoryDB(single), HistoryDB(parallel)
+    ev_cols = "mondo_id, commit_seq, operation, predicate, value"
+    sn_cols = "mondo_id, commit_seq, content_hash"
+    assert _multiset(ds, "events", ev_cols) == _multiset(dp, "events", ev_cols)
+    assert _multiset(ds, "term_snapshots", sn_cols) == _multiset(dp, "term_snapshots", sn_cols)
+    ds.close()
+    dp.close()
+
+
+def test_parallel_rebuild_clears_stale_partfiles(obo_repo: Path, tmp_path: Path):
+    # Re-running into the same dir must not accumulate/duplicate rows.
+    out = tmp_path / "art"
+    build_parallel(str(obo_repo), OBO, out, jobs=2)
+    first = HistoryDB(out)
+    n_events = first.con.execute("SELECT count(*) FROM events").fetchone()[0]
+    first.close()
+
+    build_parallel(str(obo_repo), OBO, out, jobs=3)  # different chunking
+    again = HistoryDB(out)
+    assert again.con.execute("SELECT count(*) FROM events").fetchone()[0] == n_events
+    again.close()
 
 
 def test_term_events_are_clause_deltas(artifact: Path):

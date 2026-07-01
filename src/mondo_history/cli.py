@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 from rich.text import Text
 
+from .extract import build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
 from .query import Change, HistoryDB
@@ -34,31 +35,43 @@ def build(
     ),
     path: str = typer.Option(DEFAULT_PATH, help="File whose history to index."),
     limit: Optional[int] = typer.Option(None, help="Index only the most recent N versions."),
+    jobs: int = typer.Option(
+        0, help="Parser processes: 0 = auto (cores-2), 1 = single-threaded, N = that many."
+    ),
 ):
     """Extract history into a Parquet artifact, cloning Mondo if needed."""
-    src = _acquire(url, since, clone_dir, repo)
-    with src:
-        counts = run_extract(src, path, out, limit=limit)
-    console.print(
-        f"[green]Built[/] {out} — "
-        f"{counts['commits']} commits, {counts['snapshots']} snapshots, "
-        f"{counts['events']} events."
+    clone_path = _ensure_clone(url, since, clone_dir, repo)
+    if jobs == 1:
+        with GitSource(clone_path) as src:
+            counts = run_extract(src, path, out, limit=limit)
+    else:
+        counts = build_parallel(
+            clone_path, path, out, jobs=(jobs or None), limit=limit
+        )
+    msg = (
+        f"[green]Built[/] {out} — {counts['commits']} commits, "
+        f"{counts['snapshots']} snapshots, {counts['events']} events"
     )
+    if counts.get("skipped"):
+        msg += f", [yellow]{counts['skipped']} skipped[/]"
+    console.print(msg + ".")
 
 
-def _acquire(url: str, since: Optional[str], clone_dir: Path, repo: Optional[str]) -> GitSource:
+def _ensure_clone(url: str, since: Optional[str], clone_dir: Path, repo: Optional[str]) -> str:
+    """Return a path to a local clone, cloning if necessary."""
     if repo is not None:
         console.print(f"Reading history from existing clone [cyan]{repo}[/].")
-        return GitSource(repo)
+        return repo
     if clone_dir.exists():
         console.print(
             f"Reusing clone at [cyan]{clone_dir}[/] "
             "(delete it to re-clone with different bounds)."
         )
-        return GitSource(clone_dir)
+        return str(clone_dir)
     bound = f", since {since}" if since else ""
     console.print(f"Cloning [cyan]{url}[/] (blob-filtered{bound}) → {clone_dir} …")
-    return GitSource.clone(url, clone_dir, since=since)
+    GitSource.clone(url, clone_dir, since=since).close()
+    return str(clone_dir)
 
 
 @app.command()

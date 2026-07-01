@@ -29,16 +29,24 @@ class HistoryDB:
     def __init__(self, artifact_dir: Path | str):
         self.dir = Path(artifact_dir)
         self.con = duckdb.connect(":memory:")
-        for name in ("commits", "term_snapshots", "events", "releases"):
-            parquet = self.dir / f"{name}.parquet"
-            if not parquet.exists():
-                continue  # older artifacts may lack newer tables (e.g. releases)
+        for name in ("commits", "term_snapshots", "events", "releases", "skipped_commits"):
+            source = self._source(name)
+            if source is None:
+                continue  # table absent (single-file artifact, or older schema)
             # read_parquet needs a literal path (CREATE VIEW can't bind params);
             # escape single quotes in the path we control.
-            literal = str(parquet).replace("'", "''")
+            literal = source.replace("'", "''")
             self.con.execute(
                 f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{literal}')"
             )
+
+    def _source(self, name: str) -> str | None:
+        """Resolve a table to a read_parquet path: part-file dir glob or single file."""
+        directory = self.dir / name
+        if directory.is_dir():
+            return f"{directory}/*.parquet"
+        single = self.dir / f"{name}.parquet"
+        return str(single) if single.exists() else None
 
     def term_timeline(self, mondo_id: str, predicate: str | None = None) -> list[Change]:
         """All changes to a term, oldest first, optionally one clause kind only."""

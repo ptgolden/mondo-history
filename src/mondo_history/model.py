@@ -67,6 +67,14 @@ RELEASES = pa.schema(
     ]
 )
 
+SKIPPED_COMMITS = pa.schema(
+    [
+        ("commit_seq", pa.int32()),
+        ("sha", pa.string()),
+        ("error", pa.string()),  # exception type raised by the parser
+    ]
+)
+
 BUILD_META = pa.schema(
     [
         ("schema_version", pa.string()),
@@ -84,6 +92,7 @@ FILES = {
     "term_snapshots": TERM_SNAPSHOTS,
     "events": EVENTS,
     "releases": RELEASES,
+    "skipped_commits": SKIPPED_COMMITS,
     "build_meta": BUILD_META,
 }
 
@@ -92,6 +101,13 @@ def write_table(rows: list[dict], schema: pa.Schema, out_dir: Path, name: str) -
     """Write ``rows`` as ``<out_dir>/<name>.parquet`` using ``schema``."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{name}.parquet"
+    write_part(rows, schema, path)
+    return path
+
+
+def write_part(rows: list[dict], schema: pa.Schema, path: Path) -> Path:
+    """Write ``rows`` to a single Parquet file at ``path`` (parents created)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pylist(rows, schema=schema)
     pq.write_table(table, path, compression="zstd")
     return path

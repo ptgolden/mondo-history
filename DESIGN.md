@@ -175,3 +175,46 @@ tests/
 - Whether to store `frame_text` in `term_snapshots` or reconstruct purely from `clauses`.
 - Release-tag discovery: git tags vs `data-version` header vs GitHub releases API.
 - Whether the CLI ships a bundled recent artifact or always downloads one.
+
+---
+
+## Implementation status (2026-07-01)
+
+**Working:**
+- `gitsource` — blob-filtered clone; rename-following single-file walk; scoped,
+  delta-packed history fetch via `git backfill --sparse` (sparse-checkout scoped
+  to `mondo-edit.obo`); blob reads via a persistent `git cat-file --batch`.
+- `obo` — fastobo normalization (single-threaded parse, `threads=1`), canonical
+  clause sets, content hashing, clause diffing.
+- `extract` — single-threaded `build()` and a **parallel, streaming
+  `build_parallel()`**: contiguous chunks across worker processes (spawned, each
+  seeded by the previous chunk's last commit), **skip-and-carry-forward** on parse
+  failure/panic (recorded in `skipped_commits`), Parquet **part-files** flushed
+  periodically to bound memory. Output dirs are cleared first so re-runs don't
+  accumulate stale part-files.
+- `model` — Parquet schemas incl. `releases` and `skipped_commits`.
+- `query`/`cli` — DuckDB over part-file globs or single files; `build` (with
+  `--jobs`), `term`, `commit`, `pr`, `diff`, `releases`; rich rendering.
+- **23 tests**, incl. parallel-build == single-threaded equivalence and
+  stale-part-file clearing.
+
+**Local state:**
+- `./mondo-clone` — full history of `mondo-edit.obo`, 2017-09→2026-06 (7,487
+  versions), ~912 MB single pack, gitignored. The full build runs **offline**
+  against it (`GIT_NO_LAZY_FETCH=1`).
+
+**Validated:** parallel build produces byte-identical events/snapshots to the
+single-threaded build (checksum match on a 12-commit slice).
+
+**Next steps:**
+1. **Run the full build** over `./mondo-clone`
+   (`mondo-history build --repo mondo-clone --out artifact`, ~1 h parallel) →
+   the real artifact. Check `skipped_commits` is small and sane (the known
+   mid-era fastobo panics).
+2. **Incremental updates** — a `build --update` path: self-seed from the latest
+   snapshot per term, `git fetch` + `git backfill --sparse` the new commits,
+   append new part-files, extend `commit_seq`; ancestry check as a rewrite guard.
+3. **Distribution** — publish part-files to GitHub Releases; document HTTP
+   range-query use.
+4. **If size matters** — evaluate the keyframe + event-replay variant to shrink
+   `term_snapshots`.

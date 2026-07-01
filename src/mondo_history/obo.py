@@ -73,13 +73,18 @@ def clause_delta(
     return added, removed
 
 
-def parse_terms(data: bytes) -> dict[str, TermState]:
+def parse_terms(data: bytes, threads: int = 1) -> dict[str, TermState]:
     """Parse one OBO document into ``{mondo_id: TermState}`` for its term frames.
 
     Non-term frames (typedefs, instances) and the header are ignored — the index
     is about ontology terms.
+
+    ``threads=1`` (the default) uses fastobo's single-threaded parser: it avoids
+    CPU oversubscription when many builds run in parallel, and sidesteps the
+    threaded parser's habit of *panicking* (rather than raising) on a few
+    malformed historical clauses. Callers still guard against parse failure.
     """
-    doc = fastobo.load(io.BytesIO(data))
+    doc = fastobo.load(io.BytesIO(data), threads=threads)
     result: dict[str, TermState] = {}
     for frame in doc:
         if isinstance(frame, fastobo.term.TermFrame):
