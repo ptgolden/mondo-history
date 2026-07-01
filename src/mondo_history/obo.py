@@ -106,7 +106,12 @@ def split_document(data: bytes) -> tuple[bytes, dict[str, bytes]]:
 def _stanza_id(stanza: bytes) -> str | None:
     for line in stanza.split(b"\n"):
         if line.startswith(b"id: "):
-            return line[4:].strip().decode()
+            # The id is the first whitespace-delimited token; anything after it is
+            # a trailing OBO comment (" ! label"). No id contains whitespace, so
+            # this matches fastobo's parsed id exactly.
+            tokens = line[4:].split()
+            if tokens:
+                return tokens[0].decode()
     return None
 
 

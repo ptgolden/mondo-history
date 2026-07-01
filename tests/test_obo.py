@@ -53,6 +53,17 @@ def test_split_document_keys_terms_by_id():
     assert b"format-version" in header  # header retained as parse context
 
 
+def test_stanza_id_strips_inline_comment():
+    # An OBO "id: X ! label" comment must not become part of the key, or the
+    # text-level id won't match fastobo's parsed id (that mismatch crashed a build).
+    doc = _doc("[Term]\nid: UBERON:0000002 ! uterine cervix\nname: cervix\n")
+    header, terms = split_document(doc)
+    assert set(terms) == {"UBERON:0000002"}
+    parsed, failed = parse_stanzas(header, terms)
+    assert set(parsed) == {"UBERON:0000002"}
+    assert failed == []
+
+
 def test_parse_stanzas_isolates_bad_stanza():
     # One malformed stanza must not sink the batch: it is bisected out, recorded
     # as failed, and the good term still parses.

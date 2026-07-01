@@ -401,10 +401,13 @@ def _build_chunk(
             for mondo_id in failed:
                 raw[mondo_id] = cur_hash[mondo_id]  # don't retry identical bad bytes
             for mondo_id, term in parsed.items():
+                digest = cur_hash.get(mondo_id)
+                if digest is None:
+                    continue  # fastobo id differs from our stanza key; can't track
                 snap_rows.append(_snapshot_row(version, term))
                 n_snap += 1
                 state[mondo_id] = term
-                raw[mondo_id] = cur_hash[mondo_id]
+                raw[mondo_id] = digest
         else:
             changed = [mid for mid in stanzas if cur_hash[mid] != raw.get(mid)]
             removed = raw.keys() - stanzas.keys()
@@ -419,7 +422,16 @@ def _build_chunk(
             for mondo_id in changed:
                 if mondo_id in failed_set:
                     continue
-                term = parsed[mondo_id]
+                term = parsed.get(mondo_id)
+                if term is None:
+                    # Stanza parsed, but fastobo keyed it under a different id than
+                    # our text-level scan did; record and skip rather than crash.
+                    skipped.append(
+                        {"commit_seq": version.commit.seq, "sha": version.commit.sha,
+                         "mondo_id": mondo_id, "error": "IdMismatch"}
+                    )
+                    raw[mondo_id] = cur_hash[mondo_id]
+                    continue
                 before = state.get(mondo_id)
                 raw[mondo_id] = cur_hash[mondo_id]
                 if before is not None and before.content_hash == term.content_hash:
