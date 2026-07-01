@@ -2,6 +2,10 @@
 
 *A queryable history of ontology evolution.*
 
+> **Status:** partially implemented. This document has been updated to reflect
+> decisions made during prototyping. See `DESIGN.md` for the concrete Parquet
+> schema and `README.md` to run the CLI.
+
 ## Overview
 
 Git is the authoritative source of Mondo's history, but in practice that history is not available during normal development.
@@ -115,9 +119,15 @@ The system has three logical components.
     Local CLI                  Hosted Query Service
 ```
 
-Only the history extraction process requires access to the complete repository.
+Only the extraction process needs Git access — and even then not a full clone of
+the whole repository. It builds a **blob-filtered clone**
+(`git clone --filter=blob:none`: commit graph and trees, no file contents) and
+then fetches only the historical contents of the single edited file via a
+**scoped, delta-packed** `git backfill --sparse` (with the sparse-checkout set to
+just `mondo-edit.obo`). So extraction downloads the history of one file and
+nothing else, in a handful of batched requests rather than one fetch per version.
 
-All user-facing tools operate against the generated history artifact.
+All user-facing tools operate against the generated history artifact, never Git.
 
 This separation is fundamental to the design.
 
@@ -136,9 +146,18 @@ It should be:
 * immutable once generated
 * versioned alongside Mondo
 
-The implementation technology is intentionally unspecified. The design should remain compatible with modern analytical storage formats and embedded query engines without depending on any particular implementation.
+The artifact is a small set of **Parquet** files (columnar, heavily compressible,
+engine-neutral, archival) queried with **DuckDB**. DuckDB reads the Parquet
+locally *and* range-queries it over plain HTTP, so a hosted deployment can be
+static file hosting (e.g. GitHub Releases) with no server — clients fetch only the
+byte ranges a query touches.
 
-Ideally, the artifact should be distributable as a single file that can be downloaded, cached, archived, and queried locally.
+The files share `commit_seq` as a single linear time axis. Updates append new
+Parquet part-files rather than rewriting existing ones (see *Build & Update
+Model*), so consumers can pull just the delta. The full artifact is estimated at
+roughly 100–300 MB, dominated by term snapshots and highly compressible.
+
+See `DESIGN.md` for the concrete schema.
 
 ---
 
@@ -161,9 +180,66 @@ Entity history index
 Historical queries
 ```
 
-Each commit contributes one or more historical events associated with ontology entities.
+Each commit contributes historical events associated with ontology entities.
 
-The exact representation of those events is intentionally left unspecified. The important design decision is that users interact with ontology history rather than Git history.
+The representation is now decided:
+
+* **Term snapshots are the primitive.** A term's full normalized state is stored
+  only on the commits where it changed (detected by content-hashing each term
+  frame). Reconstructing a term at any point is "the latest snapshot at or before
+  that commit."
+* **Clause-level events are derived** by diffing adjacent snapshots of a term:
+  `(mondo_id, commit_seq, predicate, value, add|remove)`. This is the queryable
+  spine for "when did this synonym / xref / parent change." A term's creation and
+  removal are recoverable from snapshot presence, so they need no dedicated event
+  kind.
+
+The important design decision is unchanged: users interact with ontology history
+rather than Git history.
+
+---
+
+# Build & Update Model
+
+## Full build
+
+The initial build walks every commit that touched the edited file (~7,500 over
+Mondo's history), oldest first, parsing each version and diffing it against the
+previous one to emit snapshots and events.
+
+* **Parsing is parallel.** Parsing each ~45 MB version dominates the cost and is
+  independent per commit, so the commit range is split into contiguous chunks
+  across cores; each chunk parses its own commits plus one "seed" commit from the
+  previous chunk so boundary diffs stay correct. Diffing itself is a cheap
+  sequential hash-compare.
+* **Unparseable commits are skipped and carried forward.** A few historical
+  versions cannot be parsed (the OBO parser rejects, or even panics on, some old
+  malformed clauses). Such a commit is recorded in a `skipped_commits` table and
+  does *not* advance the "previous" state, so its changes fold into the next
+  parseable commit rather than crashing the build. Nothing is lost; attribution is
+  slightly lumpy across the bad commit.
+
+## Incremental updates
+
+Because Git history is append-only, keeping the artifact current does **not**
+require reprocessing history — only the new commits.
+
+* **Self-seeding:** the ontology's full state at the last built commit is
+  recovered from the artifact itself (the latest snapshot per term), so an update
+  needs no side-car state.
+* **Cheap fetch:** `git fetch` for the new commits, then `git backfill --sparse`
+  for just the new file blobs.
+* **Stable axis:** new commits extend `commit_seq` (`last + 1, +2, …`); existing
+  values never change, so published data and cached results stay valid.
+* **Append, don't rewrite:** each update writes new Parquet part-files; consumers
+  download only the delta.
+* **Rewrite guard:** the last built HEAD sha is recorded; if it is no longer an
+  ancestor of the new HEAD (history was rewritten), the update falls back to a
+  full rebuild.
+
+The steady state is therefore one expensive full build, then perpetual cheap
+appends — a Mondo release adds a handful of commits, seconds of work, and a few
+kilobytes of new part-files.
 
 ---
 
@@ -213,20 +289,30 @@ Longer term, the project could provide a general mechanism for exploring ontolog
 
 # Open Questions
 
-The design intentionally leaves several questions open.
+Several of the original open questions are now decided:
 
-Examples include:
+* **Granularity of a historical event** — a clause-level add/remove, derived from
+  term snapshots (see *Conceptual Data Model*).
+* **How changes are represented internally** — normalized OBO clauses (via
+  fastobo's own serialization), diffed as multisets.
+* **Point-in-time reconstruction** — supported directly: the latest snapshot at or
+  before a commit.
+* **Release information** — a `releases` table maps each Git tag to the
+  file-history commit at or before it, enabling "between two releases" queries.
+* **Completeness vs size** — full snapshots on every change keep reconstruction
+  trivial; the artifact is an estimated ~100–300 MB and highly compressible. A
+  leaner "keyframe + event replay" variant is a known lever if size ever matters
+  more than reconstruction simplicity.
 
-* What is the appropriate granularity of a historical event?
-* How should ontology changes be represented internally?
-* How much contextual information should accompany each event?
-* Should users be able to reconstruct the state of a term at an arbitrary point in history?
-* How should release information be incorporated?
-* What indexing strategy best supports interactive queries?
-* How should the artifact balance completeness against size?
+Still open, and best informed by real workflows:
+
+* How much contextual information should accompany each event beyond the linked
+  commit / PR?
+* What indexing strategy best supports interactive queries at scale?
 * Which historical questions arise most frequently during ontology development?
 
-These questions should be informed primarily by real debugging and maintenance workflows rather than implementation convenience.
+These questions should be informed primarily by real debugging and maintenance
+workflows rather than implementation convenience.
 
 ---
 
