@@ -186,12 +186,20 @@ tests/
   to `mondo-edit.obo`); blob reads via a persistent `git cat-file --batch`.
 - `obo` — fastobo normalization (single-threaded parse, `threads=1`), canonical
   clause sets, content hashing, clause diffing.
-- `extract` — single-threaded `build()` and a **parallel, streaming
-  `build_parallel()`**: contiguous chunks across worker processes (spawned, each
-  seeded by the previous chunk's last commit), **skip-and-carry-forward** on parse
-  failure/panic (recorded in `skipped_commits`), Parquet **part-files** flushed
-  periodically to bound memory. Output dirs are cleared first so re-runs don't
-  accumulate stale part-files.
+- `extract` — single-threaded `build()` (full-parse reference) and a **parallel,
+  streaming `build_parallel()`**: contiguous chunks across spawned worker
+  processes, each seeded by the previous chunk's last commit; Parquet
+  **part-files** flushed periodically to bound memory; output dirs cleared first
+  so re-runs don't accumulate stale files.
+  - **Diff-scoped parsing:** rather than fastobo-parsing all ~45 MB each commit,
+    a worker splits the file into stanzas by text (cheap), hashes each, and hands
+    fastobo *only the stanzas whose bytes changed*, carrying unchanged term state
+    forward. This is ~10× faster (verified byte-identical to full parsing) and
+    more resilient — an unparseable stanza only matters at the commit that
+    touches it.
+  - **Per-term skip-and-isolate:** a failing batch is bisected until the single
+    offending stanza is found; that one term is recorded in `skipped` and skipped,
+    never the whole commit.
 - `model` — Parquet schemas incl. `releases` and `skipped_commits`.
 - `query`/`cli` — DuckDB over part-file globs or single files; `build` (with
   `--jobs`), `term`, `commit`, `pr`, `diff`, `releases`; rich rendering.
@@ -208,9 +216,9 @@ single-threaded build (checksum match on a 12-commit slice).
 
 **Next steps:**
 1. **Run the full build** over `./mondo-clone`
-   (`mondo-history build --repo mondo-clone --out artifact`, ~1 h parallel) →
-   the real artifact. Check `skipped_commits` is small and sane (the known
-   mid-era fastobo panics).
+   (`mondo-history build --repo mondo-clone --out artifact`, ~15-25 min parallel
+   with diff-scoped parsing) → the real artifact. Check the `skipped` table is
+   small and sane (the isolated mid-era fastobo panics).
 2. **Incremental updates** — a `build --update` path: self-seed from the latest
    snapshot per term, `git fetch` + `git backfill --sparse` the new commits,
    append new part-files, extend `commit_seq`; ancestry check as a rewrite guard.

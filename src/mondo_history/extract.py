@@ -24,7 +24,15 @@ from pathlib import Path
 
 from . import model
 from .gitsource import CommitInfo, FileVersion, GitSource, TagRef
-from .obo import Clause, TermState, clause_delta, parse_terms
+from .obo import (
+    Clause,
+    TermState,
+    clause_delta,
+    parse_stanzas,
+    parse_terms,
+    split_document,
+    stanza_hash,
+)
 
 # Flush a worker's accumulated rows to a part-file every this many processed
 # commits, so peak memory stays bounded regardless of history length.
@@ -263,7 +271,7 @@ def build_parallel(
             manager.shutdown()
 
     skipped = [row for r in results for row in r["skipped"]]
-    model.write_table(skipped, model.SKIPPED_COMMITS, out, "skipped_commits")
+    model.write_table(skipped, model.SKIPPED, out, "skipped")
     meta = [
         {
             "schema_version": model.SCHEMA_VERSION,
@@ -329,7 +337,7 @@ def _build_chunk(
     src = GitSource(clone_path)
     windowed = list(src.iter_file_history(obo_path))[offset:]
 
-    prev = _seed_state(src, windowed, start)
+    state, raw = _seed_state(src, windowed, start)
     snap_rows: list[dict] = []
     event_rows: list[dict] = []
     skipped: list[dict] = []
@@ -351,42 +359,50 @@ def _build_chunk(
 
     for i in range(start, end):
         if ticks is not None:
-            ticks.put(1)  # one tick per commit, whether processed or skipped
+            ticks.put(1)  # one tick per commit
         version = windowed[i]
-        try:
-            current = parse_terms(src.read_blob(version.blob_oid))
-        except BaseException as exc:  # fastobo may panic, not just raise
-            skipped.append(
-                {"commit_seq": version.commit.seq, "sha": version.commit.sha,
-                 "error": type(exc).__name__}
-            )
-            continue  # carry forward: do not advance `prev`
+        # Split the file into stanzas by text (cheap) and hash each; only the
+        # stanzas whose bytes changed are handed to fastobo.
+        context, stanzas = split_document(src.read_blob(version.blob_oid))
+        cur_hash = {mid: stanza_hash(s) for mid, s in stanzas.items()}
 
-        if i == 0:  # the single global baseline: snapshot all, emit no events
-            for term in current.values():
+        if i == 0:  # global baseline: snapshot every term, emit no events
+            parsed, failed = parse_stanzas(context, stanzas)
+            _record_skips(skipped, version, failed)
+            for mondo_id, term in parsed.items():
                 snap_rows.append(_snapshot_row(version, term))
                 n_snap += 1
+                state[mondo_id] = term
+                raw[mondo_id] = cur_hash[mondo_id]
         else:
-            for mondo_id, term in current.items():
-                before = prev.get(mondo_id) if prev else None
-                if before is not None and before.content_hash == term.content_hash:
+            changed = [mid for mid in stanzas if cur_hash[mid] != raw.get(mid)]
+            removed = raw.keys() - stanzas.keys()
+            parsed, failed = parse_stanzas(context, {mid: stanzas[mid] for mid in changed})
+            failed_set = set(failed)
+            _record_skips(skipped, version, failed)  # carry forward: keep old state
+            for mondo_id in changed:
+                if mondo_id in failed_set:
                     continue
+                term = parsed[mondo_id]
+                before = state.get(mondo_id)
+                raw[mondo_id] = cur_hash[mondo_id]
+                if before is not None and before.content_hash == term.content_hash:
+                    continue  # bytes changed but canonical content did not
                 snap_rows.append(_snapshot_row(version, term))
                 n_snap += 1
-                added, removed = clause_delta(
-                    before.clauses if before else _EMPTY, term.clauses
-                )
+                added, gone = clause_delta(before.clauses if before else _EMPTY, term.clauses)
                 event_rows.extend(_event_rows(version, mondo_id, added, model.Operation.ADD))
-                event_rows.extend(_event_rows(version, mondo_id, removed, model.Operation.REMOVE))
-                n_evt += len(added) + len(removed)
-            if prev:
-                for mondo_id in prev.keys() - current.keys():
-                    event_rows.extend(
-                        _event_rows(version, mondo_id, prev[mondo_id].clauses, model.Operation.REMOVE)
-                    )
-                    n_evt += len(prev[mondo_id].clauses)
+                event_rows.extend(_event_rows(version, mondo_id, gone, model.Operation.REMOVE))
+                n_evt += len(added) + len(gone)
+                state[mondo_id] = term
+            for mondo_id in removed:
+                event_rows.extend(
+                    _event_rows(version, mondo_id, state[mondo_id].clauses, model.Operation.REMOVE)
+                )
+                n_evt += len(state[mondo_id].clauses)
+                del state[mondo_id]
+                del raw[mondo_id]
 
-        prev = current
         since_flush += 1
         if since_flush >= _FLUSH_EVERY:
             flush()
@@ -399,16 +415,32 @@ def _build_chunk(
 
 def _seed_state(
     src: GitSource, windowed: list[FileVersion], start: int
-) -> dict[str, TermState] | None:
-    """Parse the nearest parseable version before ``start`` to seed diffs.
+) -> tuple[dict[str, TermState], dict[str, bytes]]:
+    """Full state at the version before ``start``: parsed clauses + stanza hashes.
 
-    Walking back past an unparseable seed keeps chunk-boundary diffs consistent
-    with skip-and-carry-forward. Returns None for the first chunk (start == 0),
-    whose first version is the baseline.
+    Empty for the first chunk (``start == 0``), whose first version is the
+    baseline. Per-stanza parse failures are isolated and simply omitted from the
+    seed (they surface as skips when that term next changes).
     """
-    for j in range(start - 1, -1, -1):
-        try:
-            return parse_terms(src.read_blob(windowed[j].blob_oid))
-        except BaseException:
-            continue
-    return None
+    state: dict[str, TermState] = {}
+    raw: dict[str, bytes] = {}
+    if start == 0:
+        return state, raw
+    context, stanzas = split_document(src.read_blob(windowed[start - 1].blob_oid))
+    parsed, _failed = parse_stanzas(context, stanzas)
+    for mondo_id, term in parsed.items():
+        state[mondo_id] = term
+        raw[mondo_id] = stanza_hash(stanzas[mondo_id])
+    return state, raw
+
+
+def _record_skips(skipped: list[dict], version: FileVersion, failed: list[str]) -> None:
+    for mondo_id in failed:
+        skipped.append(
+            {
+                "commit_seq": version.commit.seq,
+                "sha": version.commit.sha,
+                "mondo_id": mondo_id,
+                "error": "ParseError",
+            }
+        )

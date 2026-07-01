@@ -67,11 +67,12 @@ RELEASES = pa.schema(
     ]
 )
 
-SKIPPED_COMMITS = pa.schema(
+SKIPPED = pa.schema(
     [
         ("commit_seq", pa.int32()),
         ("sha", pa.string()),
-        ("error", pa.string()),  # exception type raised by the parser
+        ("mondo_id", pa.string()),  # the single term whose stanza failed to parse
+        ("error", pa.string()),
     ]
 )
 
@@ -92,7 +93,7 @@ FILES = {
     "term_snapshots": TERM_SNAPSHOTS,
     "events": EVENTS,
     "releases": RELEASES,
-    "skipped_commits": SKIPPED_COMMITS,
+    "skipped": SKIPPED,
     "build_meta": BUILD_META,
 }
 

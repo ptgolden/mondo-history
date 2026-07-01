@@ -29,7 +29,7 @@ class HistoryDB:
     def __init__(self, artifact_dir: Path | str):
         self.dir = Path(artifact_dir)
         self.con = duckdb.connect(":memory:")
-        for name in ("commits", "term_snapshots", "events", "releases", "skipped_commits"):
+        for name in ("commits", "term_snapshots", "events", "releases", "skipped"):
             source = self._source(name)
             if source is None:
                 continue  # table absent (single-file artifact, or older schema)
