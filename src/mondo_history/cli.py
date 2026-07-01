@@ -14,6 +14,8 @@ from .query import Change, HistoryDB
 
 DEFAULT_PATH = "src/ontology/mondo-edit.obo"
 DEFAULT_ARTIFACT = Path("artifact")
+DEFAULT_URL = "https://github.com/monarch-initiative/mondo.git"
+DEFAULT_CLONE = Path("mondo-clone")
 
 app = typer.Typer(add_completion=False, help="Build and query the Mondo history index.")
 console = Console()
@@ -21,19 +23,42 @@ console = Console()
 
 @app.command()
 def build(
-    repo: str = typer.Option("../mondo", help="Path to a Mondo clone to read history from."),
-    path: str = typer.Option(DEFAULT_PATH, help="File whose history to index."),
     out: Path = typer.Option(DEFAULT_ARTIFACT, help="Output artifact directory."),
+    url: str = typer.Option(DEFAULT_URL, help="Mondo repo to clone (blob-filtered)."),
+    since: Optional[str] = typer.Option(
+        None, help="Only index history at/after this git date, e.g. 2026-06-01."
+    ),
+    clone_dir: Path = typer.Option(DEFAULT_CLONE, help="Where the blob-filtered clone lives."),
+    repo: Optional[str] = typer.Option(
+        None, help="Use an existing local clone instead of cloning --url."
+    ),
+    path: str = typer.Option(DEFAULT_PATH, help="File whose history to index."),
     limit: Optional[int] = typer.Option(None, help="Index only the most recent N versions."),
 ):
-    """Extract history into a Parquet artifact."""
-    with GitSource(repo) as src:
+    """Extract history into a Parquet artifact, cloning Mondo if needed."""
+    src = _acquire(url, since, clone_dir, repo)
+    with src:
         counts = run_extract(src, path, out, limit=limit)
     console.print(
         f"[green]Built[/] {out} — "
         f"{counts['commits']} commits, {counts['snapshots']} snapshots, "
         f"{counts['events']} events."
     )
+
+
+def _acquire(url: str, since: Optional[str], clone_dir: Path, repo: Optional[str]) -> GitSource:
+    if repo is not None:
+        console.print(f"Reading history from existing clone [cyan]{repo}[/].")
+        return GitSource(repo)
+    if clone_dir.exists():
+        console.print(
+            f"Reusing clone at [cyan]{clone_dir}[/] "
+            "(delete it to re-clone with different bounds)."
+        )
+        return GitSource(clone_dir)
+    bound = f", since {since}" if since else ""
+    console.print(f"Cloning [cyan]{url}[/] (blob-filtered{bound}) → {clone_dir} …")
+    return GitSource.clone(url, clone_dir, since=since)
 
 
 @app.command()

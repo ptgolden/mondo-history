@@ -74,31 +74,36 @@ class GitSource:
 
     @classmethod
     def clone(
-        cls, url: str, dest: Path | str, *, ref: str = "HEAD"
+        cls,
+        url: str,
+        dest: Path | str,
+        *,
+        ref: str | None = None,
+        since: str | None = None,
+        depth: int | None = None,
     ) -> "GitSource":
         """Create a blob-filtered, checkout-free clone of ``url`` at ``dest``.
 
         ``--filter=blob:none`` fetches the commit graph and trees but no file
         contents; ``--no-checkout`` skips materializing a working tree we never
         use. File contents are fetched lazily from the promisor remote when
-        :meth:`read_blob` first touches them.
+        :meth:`read_blob` first touches them — so a build only ever downloads the
+        blobs of the one file it walks.
+
+        ``since`` (a git date such as ``2026-06-01``) or ``depth`` bound the
+        clone to a recent slice of history via a shallow clone; they are mutually
+        exclusive. ``ref`` restricts to a single branch.
         """
         dest = Path(dest)
-        _run(
-            [
-                "git",
-                "clone",
-                "--filter=blob:none",
-                "--no-checkout",
-                "--branch",
-                ref,
-                url,
-                str(dest),
-            ]
-            if ref != "HEAD"
-            else ["git", "clone", "--filter=blob:none", "--no-checkout", url, str(dest)],
-            cwd=None,
-        )
+        cmd = ["git", "clone", "--filter=blob:none", "--no-checkout"]
+        if ref is not None:
+            cmd += ["--branch", ref]
+        if since is not None:
+            cmd += [f"--shallow-since={since}"]
+        elif depth is not None:
+            cmd += ["--depth", str(depth)]
+        cmd += [url, str(dest)]
+        _run(cmd, cwd=None)
         return cls(dest)
 
     def iter_file_history(self, path: str) -> Iterator[FileVersion]:
