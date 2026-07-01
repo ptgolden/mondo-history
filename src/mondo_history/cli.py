@@ -38,6 +38,7 @@ def build(
     jobs: int = typer.Option(
         0, help="Parser processes: 0 = auto (cores-2), 1 = single-threaded, N = that many."
     ),
+    progress: bool = typer.Option(True, help="Show a per-commit progress bar (parallel builds)."),
 ):
     """Extract history into a Parquet artifact, cloning Mondo if needed."""
     clone_path = _ensure_clone(url, since, clone_dir, repo)
@@ -46,7 +47,7 @@ def build(
             counts = run_extract(src, path, out, limit=limit)
     else:
         counts = build_parallel(
-            clone_path, path, out, jobs=(jobs or None), limit=limit
+            clone_path, path, out, jobs=(jobs or None), limit=limit, progress=progress
         )
     msg = (
         f"[green]Built[/] {out} — {counts['commits']} commits, "

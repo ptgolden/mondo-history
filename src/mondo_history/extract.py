@@ -206,6 +206,7 @@ def build_parallel(
     *,
     jobs: int | None = None,
     limit: int | None = None,
+    progress: bool = False,
 ) -> dict:
     """Build the artifact from a local clone using a pool of parsing workers.
 
@@ -245,14 +246,21 @@ def build_parallel(
 
     # "spawn" (not fork): workers parse with fastobo's threaded runtime, and
     # fork() in a multi-threaded process risks deadlock.
-    with ProcessPoolExecutor(
-        max_workers=jobs, mp_context=multiprocessing.get_context("spawn")
-    ) as pool:
-        futures = [
-            pool.submit(_build_chunk, clone_path, obo_path, str(out), offset, i, s, e)
-            for i, (s, e) in enumerate(bounds)
-        ]
-        results = [f.result() for f in futures]
+    ctx = multiprocessing.get_context("spawn")
+    manager = ctx.Manager() if progress else None
+    ticks = manager.Queue() if manager else None  # workers report per-commit
+    try:
+        with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as pool:
+            futures = [
+                pool.submit(_build_chunk, clone_path, obo_path, str(out), offset, i, s, e, ticks)
+                for i, (s, e) in enumerate(bounds)
+            ]
+            if progress:
+                _consume_ticks(futures, ticks, n)
+            results = [f.result() for f in futures]
+    finally:
+        if manager is not None:
+            manager.shutdown()
 
     skipped = [row for r in results for row in r["skipped"]]
     model.write_table(skipped, model.SKIPPED_COMMITS, out, "skipped_commits")
@@ -276,6 +284,24 @@ def build_parallel(
     }
 
 
+def _consume_ticks(futures, ticks, total: int) -> None:
+    """Drain per-commit ticks from workers into a single tqdm bar."""
+    import queue as _queue
+
+    from tqdm import tqdm
+
+    seen = 0
+    with tqdm(total=total, unit="commit", desc="building", smoothing=0.05) as bar:
+        while seen < total:
+            try:
+                ticks.get(timeout=0.5)
+                seen += 1
+                bar.update(1)
+            except _queue.Empty:
+                if all(f.done() for f in futures):
+                    break  # a worker finished/failed without emitting all ticks
+
+
 def _chunk_bounds(n: int, k: int) -> list[tuple[int, int]]:
     """Split ``range(n)`` into ``k`` contiguous, balanced (start, end) spans."""
     k = max(1, min(k, n)) if n else 1
@@ -296,6 +322,7 @@ def _build_chunk(
     chunk_id: int,
     start: int,
     end: int,
+    ticks=None,
 ) -> dict:
     """Worker: parse+diff ``windowed[start:end]`` and stream part-files."""
     out = Path(out_dir)
@@ -323,6 +350,8 @@ def _build_chunk(
         snap_rows, event_rows, batch = [], [], batch + 1
 
     for i in range(start, end):
+        if ticks is not None:
+            ticks.put(1)  # one tick per commit, whether processed or skipped
         version = windowed[i]
         try:
             current = parse_terms(src.read_blob(version.blob_oid))
