@@ -227,6 +227,8 @@ def _render_timeline(
         header_line = Text("\n● ")
         header_line.append(head.sha[:7], style="bold yellow")
         header_line.append(f"  {_date(head.committed_date)}  ")
+        if head.author_name:
+            header_line.append(f"{head.author_name}  ", style="cyan")
         # Mondo commit messages end with `(#N)`, so a styled PR badge would
         # duplicate what's already in the subject line. pr_number stays in
         # the artifact for filtering; we just don't render it twice here.
@@ -298,6 +300,8 @@ def _render_commit_view(
     header_line = Text("● ")
     header_line.append(head.sha[:7], style="bold yellow")
     header_line.append(f"  {_date(head.committed_date)}  ")
+    if head.author_name:
+        header_line.append(f"{head.author_name}  ", style="cyan")
     header_line.append(head.message.splitlines()[0], style="dim")
     console.print(header_line)
     n_terms = len({tc.mondo_id for tc in events})
@@ -349,6 +353,8 @@ def _render_diff_view(
             commit_header = Text("  ● ")
             commit_header.append(head.sha[:7], style="bold yellow")
             commit_header.append(f"  {_date(head.committed_date)}  ")
+            if head.author_name:
+                commit_header.append(f"{head.author_name}  ", style="cyan")
             commit_header.append(head.message.splitlines()[0], style="dim")
             console.print(commit_header)
             changes = [tc.change for tc in commit_rows]

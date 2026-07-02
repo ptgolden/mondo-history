@@ -17,6 +17,7 @@ def _change(op: str, predicate: str, value: str, seq: int = 1) -> Change:
         commit_seq=seq,
         committed_date="2026-01-01",
         sha="a" * 40,
+        author_name="Test Author",
         pr_number=None,
         message="msg",
         operation=op,
@@ -267,7 +268,7 @@ def test_render_op_edit_target_label_only():
     )
     assert "{+complement 3 glomerulopathy+}" in line.plain
     # And a labeled tag makes the semantics clear.
-    assert "(target label)" in line.plain
+    assert "(referenced term renamed)" in line.plain
 
 
 def test_render_op_edit_qualifier_reorder_is_a_labeled_no_op():
@@ -305,7 +306,7 @@ def test_render_op_edit_falls_through_when_body_and_quals_both_change_no_quals()
     ops = pair_events(changes)
     assert isinstance(ops[0], Edit)
     line = render_op(ops[0])
-    assert "(target label)" not in line.plain
+    assert "(referenced term renamed)" not in line.plain
     assert "(qualifier order rewritten)" not in line.plain
     assert "[-OMIM:1-]{+OMIM:2+}" in line.plain
     # Single line — no indented qualifier block.

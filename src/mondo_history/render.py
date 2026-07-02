@@ -319,7 +319,7 @@ def _render_comment_only(
         line.append(f"[-{old}-]", style="red")
     if new:
         line.append(f"{{+{new}+}}", style="green")
-    line.append("  (target label)", style="dim")
+    line.append("  (referenced term renamed)", style="dim")
     return line
 
 

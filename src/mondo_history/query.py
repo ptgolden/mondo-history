@@ -22,6 +22,7 @@ class Change:
     commit_seq: int
     committed_date: object
     sha: str
+    author_name: str
     pr_number: int | None
     message: str
     operation: str
@@ -99,7 +100,8 @@ class HistoryDB:
             params.append(predicate)
         rows = self.con.execute(
             f"""
-            SELECT c.commit_seq, c.committed_date, c.sha, c.pr_number, c.message,
+            SELECT c.commit_seq, c.committed_date, c.sha, c.author_name,
+                   c.pr_number, c.message,
                    e.operation, e.predicate, e.value
             FROM events e
             JOIN commits c USING (commit_seq)
@@ -178,14 +180,14 @@ class HistoryDB:
         Returns ``(None, [])`` when no commit matches the sha prefix.
         """
         row = self.con.execute(
-            """SELECT commit_seq, sha, committed_date, pr_number, message
+            """SELECT commit_seq, sha, author_name, committed_date, pr_number, message
                FROM commits WHERE sha LIKE ? || '%' ORDER BY commit_seq LIMIT 1""",
             [sha_prefix],
         ).fetchone()
         if row is None:
             return None, []
-        commit_seq, sha, date, pr, message = row
-        head = Change(commit_seq, date, sha, pr, message, "", "", "")
+        commit_seq, sha, author, date, pr, message = row
+        head = Change(commit_seq, date, sha, author, pr, message, "", "", "")
 
         rows = self.con.execute(
             """
@@ -202,7 +204,9 @@ class HistoryDB:
             TermChange(
                 mondo_id=mondo_id,
                 name=name,
-                change=Change(commit_seq, date, sha, pr, message, op, pred, val),
+                change=Change(
+                    commit_seq, date, sha, author, pr, message, op, pred, val
+                ),
             )
             for mondo_id, name, op, pred, val in rows
         ]
@@ -263,7 +267,8 @@ class HistoryDB:
         rows = self.con.execute(
             f"""
             SELECT e.mondo_id, s.name,
-                   c.commit_seq, c.committed_date, c.sha, c.pr_number, c.message,
+                   c.commit_seq, c.committed_date, c.sha, c.author_name,
+                   c.pr_number, c.message,
                    e.operation, e.predicate, e.value
             FROM events e
             JOIN commits c USING (commit_seq)
@@ -278,9 +283,11 @@ class HistoryDB:
             TermChange(
                 mondo_id=mondo_id,
                 name=name,
-                change=Change(seq, date, sha, pr, message, op, pred, val),
+                change=Change(
+                    seq, date, sha, author, pr, message, op, pred, val
+                ),
             )
-            for mondo_id, name, seq, date, sha, pr, message, op, pred, val in rows
+            for mondo_id, name, seq, date, sha, author, pr, message, op, pred, val in rows
         ]
 
     def releases(self) -> list[tuple[str, int, object]]:
