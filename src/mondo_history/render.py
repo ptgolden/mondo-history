@@ -219,21 +219,24 @@ def _render_plain(predicate: str, value: str, marker: str, style: str, cap: int 
 
 
 def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Text:
-    """Render a paired remove/add as one ``~`` line.
+    """Render a paired remove/add as one ``~`` line, structure-aware.
 
-    First tries to parse both sides via fastobo and pick a **structure-aware**
-    rendering for cases where lexical word-diff misleads:
+    Parses both sides via fastobo into ``(body, qualifiers, ! comment)`` and
+    picks a rendering that matches the shape of the change:
 
-    * ``body`` + qualifier set identical, only the ``!`` comment differs →
-      the referenced target term was renamed elsewhere; this clause is
-      semantically unchanged. The shared form renders plain and only the
-      comment change gets marked.
+    * ``body`` + qualifier set identical, only ``!`` comment differs → target
+      term was renamed elsewhere. Render shared form plain, comment change
+      bracketed, tagged ``(target label)``.
     * ``body`` + comment identical, qualifier multiset identical but ordered
-      differently → a pure serialization reshuffle. Render the current form
-      and tag it "(qualifier order rewritten)".
-
-    Everything else — including any case where fastobo can't parse either
-    side — falls through to the token-level word-diff.
+      differently → serialization reshuffle. Render current form, tag
+      ``(qualifier order rewritten)``.
+    * Qualifier multiset differs (anywhere) → render as a **block**: body +
+      comment on the top ``~`` line (word-diffed inline if they changed),
+      then each qualifier on its own indented sub-line with a ``-``/``+``/``~``
+      marker or dim if kept. Reads like an axiom-annotation diff, not a
+      run-together sentence.
+    * Everything else (including any case where fastobo can't parse either
+      side) → the token-level word-diff fallback.
     """
     b = parse_clause_value(predicate, before)
     a = parse_clause_value(predicate, after)
@@ -249,6 +252,8 @@ def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Te
                 return _render_comment_only(predicate, b, a, cap)
             if not quals_order_same:
                 return _render_reorder_only(predicate, a, cap)
+        if not quals_multiset_same:
+            return _render_qualifier_block(predicate, b, a, cap)
 
     return _render_token_diff(predicate, before, after, cap)
 
@@ -293,10 +298,119 @@ def _head(pv: ParsedValue) -> str:
     return f"{pv.body} {{{', '.join(pv.qualifiers)}}}"
 
 
-def _render_token_diff(
-    predicate: str, before: str, after: str, cap: int | None
+def _render_qualifier_block(
+    predicate: str, before: ParsedValue, after: ParsedValue, cap: int | None
 ) -> Text:
-    """Fallback: token-level word-diff over the raw value strings.
+    """Render a body + comment on the top line, then indent the qualifier diff.
+
+    The qualifier list diffs as a sequence: kept qualifiers render dim as
+    context, inserts as ``+``, deletes as ``-``. A ``replace`` opcode gets
+    sub-paired by similarity so a qualifier whose value was edited (same
+    ``key`` on both sides, different value) shows as one ``~`` line with an
+    inline word-diff, rather than a ``-`` / ``+`` pair.
+    """
+    text = Text("    ")
+    text.append("~ ", style="bold yellow")
+    text.append(f"{predicate}: ")
+    _append_body(text, before.body, after.body, cap)
+    _append_comment_tail(text, before.comment, after.comment, cap)
+
+    matcher = SequenceMatcher(None, before.qualifiers, after.qualifiers, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for q in before.qualifiers[i1:i2]:
+                text.append("\n        ")
+                text.append(_truncate(q, cap), style="dim")
+        elif tag == "delete":
+            for q in before.qualifiers[i1:i2]:
+                text.append("\n      ")
+                text.append("- ", style="bold red")
+                text.append(_truncate(q, cap))
+        elif tag == "insert":
+            for q in after.qualifiers[j1:j2]:
+                text.append("\n      ")
+                text.append("+ ", style="bold green")
+                text.append(_truncate(q, cap))
+        elif tag == "replace":
+            removes = list(before.qualifiers[i1:i2])
+            adds = list(after.qualifiers[j1:j2])
+            pairs, unpaired_r, unpaired_a = _pair_strings(removes, adds)
+            for r, a in pairs:
+                text.append("\n      ")
+                text.append("~ ", style="bold yellow")
+                _append_word_diff(text, r, a, cap)
+            for q in unpaired_r:
+                text.append("\n      ")
+                text.append("- ", style="bold red")
+                text.append(_truncate(q, cap))
+            for q in unpaired_a:
+                text.append("\n      ")
+                text.append("+ ", style="bold green")
+                text.append(_truncate(q, cap))
+    return text
+
+
+def _append_body(text: Text, before: str, after: str, cap: int | None) -> None:
+    """Body of the clause: plain if unchanged, word-diffed if changed."""
+    if before == after:
+        text.append(_truncate(before, cap))
+    else:
+        _append_word_diff(text, before, after, cap)
+
+
+def _append_comment_tail(
+    text: Text, before: str | None, after: str | None, cap: int | None
+) -> None:
+    """Trailing ``! comment``: skip if absent both sides, plain if unchanged,
+    bracketed pair if changed."""
+    if not before and not after:
+        return
+    text.append(" ! ")
+    if before == after:
+        text.append(_truncate(after or "", cap))
+        return
+    if before:
+        text.append(f"[-{_truncate(before, cap)}-]", style="red")
+    if after:
+        text.append(f"{{+{_truncate(after, cap)}+}}", style="green")
+
+
+def _pair_strings(
+    removes: list[str], adds: list[str], threshold: float = 0.4
+) -> tuple[list[tuple[str, str]], list[str], list[str]]:
+    """Greedy similarity pairing of removed/added strings.
+
+    Used for qualifier sub-pairing inside a ``replace`` opcode: a qualifier
+    whose value changed (e.g. ``source="X"`` → ``source="Y"``) usually pairs
+    with its highest-similarity counterpart, letting us render it as one
+    ``~`` line instead of separate ``-`` / ``+`` lines. Threshold is lower
+    than the top-level pair threshold because we've already narrowed to a
+    single ``replace`` region and want to catch smaller-similarity same-key
+    edits.
+    """
+    scored: list[tuple[float, int, int]] = []
+    for i, r in enumerate(removes):
+        for j, a in enumerate(adds):
+            ratio = SequenceMatcher(None, r, a, autojunk=False).ratio()
+            if ratio >= threshold:
+                scored.append((ratio, i, j))
+    scored.sort(reverse=True)
+    used_r: set[int] = set()
+    used_a: set[int] = set()
+    pairs: list[tuple[str, str]] = []
+    for _, i, j in scored:
+        if i in used_r or j in used_a:
+            continue
+        used_r.add(i)
+        used_a.add(j)
+        pairs.append((removes[i], adds[j]))
+    unpaired_r = [q for i, q in enumerate(removes) if i not in used_r]
+    unpaired_a = [q for j, q in enumerate(adds) if j not in used_a]
+    return pairs, unpaired_r, unpaired_a
+
+
+def _append_word_diff(text: Text, before: str, after: str, cap: int | None) -> None:
+    """Append the token-level word-diff of ``before`` → ``after`` to ``text``.
 
     Runs at the **token** level (see ``_TOKEN_RE``) so identifier swaps,
     snake_case edits, and qualifier-membership changes show as whole-token
@@ -307,18 +421,29 @@ def _render_token_diff(
     """
     b_tokens = _tokenize(_truncate(before, cap))
     a_tokens = _tokenize(_truncate(after, cap))
-    line = Text("    ")
-    line.append("~ ", style="bold yellow")
-    line.append(f"{predicate}: ")
     matcher = SequenceMatcher(None, b_tokens, a_tokens, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
-            line.append("".join(b_tokens[i1:i2]))
+            text.append("".join(b_tokens[i1:i2]))
         elif tag == "delete":
-            line.append(f"[-{''.join(b_tokens[i1:i2])}-]", style="red")
+            text.append(f"[-{''.join(b_tokens[i1:i2])}-]", style="red")
         elif tag == "insert":
-            line.append(f"{{+{''.join(a_tokens[j1:j2])}+}}", style="green")
+            text.append(f"{{+{''.join(a_tokens[j1:j2])}+}}", style="green")
         elif tag == "replace":
-            line.append(f"[-{''.join(b_tokens[i1:i2])}-]", style="red")
-            line.append(f"{{+{''.join(a_tokens[j1:j2])}+}}", style="green")
+            text.append(f"[-{''.join(b_tokens[i1:i2])}-]", style="red")
+            text.append(f"{{+{''.join(a_tokens[j1:j2])}+}}", style="green")
+
+
+def _render_token_diff(
+    predicate: str, before: str, after: str, cap: int | None
+) -> Text:
+    """Fallback: token-level word-diff over the raw value strings.
+
+    Used when fastobo can't parse either side, or when there are no
+    qualifiers to break out into a block. The output is a single ``~`` line.
+    """
+    line = Text("    ")
+    line.append("~ ", style="bold yellow")
+    line.append(f"{predicate}: ")
+    _append_word_diff(line, before, after, cap)
     return line

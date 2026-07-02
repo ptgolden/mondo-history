@@ -270,17 +270,123 @@ def test_render_op_edit_qualifier_reorder_is_a_labeled_no_op():
     assert 'MONDO:equivalentTo' in line.plain
 
 
-def test_render_op_edit_falls_through_when_body_changes():
-    # Body differs → structural detectors don't fire; the token word-diff
-    # renders normally.
+def test_render_op_edit_falls_through_when_body_and_quals_both_change_no_quals():
+    # No qualifiers on either side and body differs → single-line token diff.
     changes = [
-        _change("remove", "xref", "OMIM:1 {source=\"A\"}"),
-        _change("add", "xref", "OMIM:2 {source=\"A\"}"),
+        _change("remove", "xref", "OMIM:1"),
+        _change("add", "xref", "OMIM:2"),
     ]
     ops = pair_events(changes)
     assert isinstance(ops[0], Edit)
     line = render_op(ops[0])
-    # No structural tag; a real word-diff appears.
     assert "(target label)" not in line.plain
     assert "(qualifier order rewritten)" not in line.plain
     assert "[-OMIM:1-]{+OMIM:2+}" in line.plain
+    # Single line — no indented qualifier block.
+    assert "\n" not in line.plain
+
+
+def test_render_op_edit_qualifier_added_shows_indented_block():
+    # Adding one qualifier: top line has body + kept qualifier as context,
+    # added qualifier marked "+" on its own indented line.
+    changes = [
+        _change("remove", "xref", 'Orphanet:200421 {source="OMIM:609814"}'),
+        _change(
+            "add", "xref",
+            'Orphanet:200421 {source="OMIM:609814", source="MONDO:superClassOf"}',
+        ),
+    ]
+    ops = pair_events(changes)
+    assert isinstance(ops[0], Edit)
+    text = render_op(ops[0])
+    lines = text.plain.split("\n")
+    assert lines[0].strip() == "~ xref: Orphanet:200421"
+    # Kept qualifier appears as context (no +/- marker).
+    assert any(l.strip() == 'source="OMIM:609814"' for l in lines[1:])
+    # Added qualifier appears with +.
+    assert any(l.strip() == '+ source="MONDO:superClassOf"' for l in lines[1:])
+
+
+def test_render_op_edit_qualifier_value_edited_shows_tilde_subline():
+    # Same qualifier key, different value: pair as one ~ sub-line with an
+    # inline word-diff. Not two separate -/+ lines.
+    changes = [
+        _change(
+            "remove", "is_a",
+            'MONDO:0016244 {source="Orphanet:2134/btnt"} ! ahus',
+        ),
+        _change(
+            "add", "is_a",
+            'MONDO:0016244 {source="ORDO:2134/btnt"} ! ahus',
+        ),
+    ]
+    ops = pair_events(changes)
+    assert isinstance(ops[0], Edit)
+    text = render_op(ops[0])
+    lines = text.plain.split("\n")
+    # Body + ! comment on top line, plain.
+    assert lines[0].strip() == "~ is_a: MONDO:0016244 ! ahus"
+    # Qualifier edit as one ~ sub-line with an inline word-diff. The CURIE is
+    # one token (see `_TOKEN_RE`), so it swaps whole.
+    assert any(
+        l.strip() == '~ source="[-Orphanet:2134/btnt-]{+ORDO:2134/btnt+}"'
+        for l in lines[1:]
+    )
+
+
+def test_render_op_edit_body_changed_and_qualifier_edited():
+    # Both body and qualifier value changed: body word-diffs on the top line,
+    # qualifier edit indented as a ~ sub-line.
+    changes = [
+        _change(
+            "remove", "relationship",
+            'has_material_basis_in_germline_mutation_in '
+            'http://identifiers.org/hgnc/4883 {source="MONDO:mim2gene_medgen"} ! CFH',
+        ),
+        _change(
+            "add", "relationship",
+            'disease_has_basis_in_dysfunction_of '
+            'http://identifiers.org/hgnc/4883 {source="mim2gene_medgen"} ! CFH',
+        ),
+    ]
+    ops = pair_events(changes)
+    assert isinstance(ops[0], Edit)
+    text = render_op(ops[0])
+    lines = text.plain.split("\n")
+    # Body word-diff on the top line, ! comment unchanged.
+    assert "[-has_material_basis_in_germline_mutation_in-]" in lines[0]
+    assert "{+disease_has_basis_in_dysfunction_of+}" in lines[0]
+    assert "http://identifiers.org/hgnc/4883" in lines[0]
+    assert lines[0].endswith("! CFH")
+    # Qualifier edit as a sub-line.
+    assert any(
+        l.strip() == '~ source="[-MONDO:mim2gene_medgen-]{+mim2gene_medgen+}"'
+        for l in lines[1:]
+    )
+
+
+def test_render_op_edit_qualifier_removed_kept_context():
+    # Removing one of two qualifiers: kept qualifier as dim context, removed
+    # qualifier marked "-".
+    changes = [
+        _change(
+            "remove", "relationship",
+            'has_material_basis_in http://x.example/hgnc/4883 '
+            '{source="MONDO:mim2gene_medgen", source="OMIM:609814"} ! CFH',
+        ),
+        _change(
+            "add", "relationship",
+            'has_material_basis_in http://x.example/hgnc/4883 '
+            '{source="OMIM:609814"} ! CFH',
+        ),
+    ]
+    ops = pair_events(changes)
+    assert isinstance(ops[0], Edit)
+    text = render_op(ops[0])
+    lines = text.plain.split("\n")
+    assert lines[0].strip().startswith("~ relationship: has_material_basis_in")
+    assert lines[0].strip().endswith("! CFH")
+    assert any(
+        l.strip() == '- source="MONDO:mim2gene_medgen"' for l in lines[1:]
+    )
+    assert any(l.strip() == 'source="OMIM:609814"' for l in lines[1:])
