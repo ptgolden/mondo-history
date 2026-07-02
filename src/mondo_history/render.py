@@ -319,8 +319,11 @@ def _render_qualifier_block(
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             for q in before.qualifiers[i1:i2]:
+                # Context line: no marker, indent aligned with the value column
+                # of the marked lines. Same convention as git diff's leading
+                # space for unchanged context.
                 text.append("\n        ")
-                text.append(_truncate(q, cap), style="dim")
+                text.append(_truncate(q, cap))
         elif tag == "delete":
             for q in before.qualifiers[i1:i2]:
                 text.append("\n      ")
