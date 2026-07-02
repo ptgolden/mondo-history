@@ -270,12 +270,13 @@ def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Te
     Parses both sides via fastobo into ``(body, qualifiers, ! comment)`` and
     picks a rendering that matches the shape of the change:
 
-    * ``body`` + qualifier set identical, only ``!`` comment differs → target
-      term was renamed elsewhere. Render shared form plain, comment change
-      bracketed, tagged ``(target label)``.
+    * ``body`` + qualifier set identical, only ``!`` comment differs →
+      render shared form plain and the comment change as one bracketed
+      edit (no token-level word-diff on the label).
     * ``body`` + comment identical, qualifier multiset identical but ordered
       differently → serialization reshuffle. Render current form, tag
-      ``(qualifier order rewritten)``.
+      ``(qualifier order rewritten)`` since the visible content would
+      otherwise look unchanged.
     * Qualifier multiset differs (anywhere) → render as a **block**: body +
       comment on the top ``~`` line (word-diffed inline if they changed),
       then each qualifier on its own indented sub-line with a ``-``/``+``/``~``
@@ -307,7 +308,16 @@ def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Te
 def _render_comment_only(
     predicate: str, before: ParsedValue, after: ParsedValue, cap: int | None
 ) -> Text:
-    """Only the trailing ``!`` name comment differs (target term was renamed)."""
+    """Only the trailing ``!`` name comment differs.
+
+    Render the shared body + qualifiers plain and the comment change as a
+    single bracketed edit — no token-level word-diff on the label itself.
+    We used to tag this case (``(referenced term renamed)``) but the tag
+    was making an interpretive leap: sometimes the target really was
+    renamed elsewhere, sometimes a label was manually added or removed,
+    and the reader can see which from the ``[-...-] {+...+}`` marks
+    without us projecting a story.
+    """
     line = Text("    ")
     line.append("~ ", style="bold yellow")
     line.append(f"{predicate}: ")
@@ -319,7 +329,6 @@ def _render_comment_only(
         line.append(f"[-{old}-]", style="red")
     if new:
         line.append(f"{{+{new}+}}", style="green")
-    line.append("  (referenced term renamed)", style="dim")
     return line
 
 

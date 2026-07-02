@@ -240,10 +240,10 @@ def test_parse_clause_value_def_keeps_xref_list_in_body():
     assert pv.comment is None
 
 
-def test_render_op_edit_target_label_only():
-    # Same is_a target and qualifiers; only the ! label differs (referenced
-    # term was renamed elsewhere). This is textually a change but the clause
-    # itself is semantically unchanged.
+def test_render_op_edit_comment_only():
+    # Same is_a target and qualifiers; only the ! label differs.
+    # Shared form renders plain and the comment change is bracketed as one
+    # atomic edit — no token-level word-diff on the label.
     changes = [
         _change(
             "remove", "is_a",
@@ -267,8 +267,6 @@ def test_render_op_edit_target_label_only():
         in line.plain
     )
     assert "{+complement 3 glomerulopathy+}" in line.plain
-    # And a labeled tag makes the semantics clear.
-    assert "(referenced term renamed)" in line.plain
 
 
 def test_render_op_edit_qualifier_reorder_is_a_labeled_no_op():
@@ -306,7 +304,6 @@ def test_render_op_edit_falls_through_when_body_and_quals_both_change_no_quals()
     ops = pair_events(changes)
     assert isinstance(ops[0], Edit)
     line = render_op(ops[0])
-    assert "(referenced term renamed)" not in line.plain
     assert "(qualifier order rewritten)" not in line.plain
     assert "[-OMIM:1-]{+OMIM:2+}" in line.plain
     # Single line — no indented qualifier block.
