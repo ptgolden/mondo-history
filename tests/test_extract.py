@@ -155,23 +155,25 @@ def test_releases_map_tag_to_commit(artifact: Path):
 def test_diff_between_release_and_head(artifact: Path):
     db = HistoryDB(artifact)
     # Between v1.0 (seq 3) and HEAD (seq 4): only the new term created at c4.
-    rows = db.changes_between("v1.0", "4")
+    rows = db.range_events("v1.0", "4")
     db.close()
-    assert [(r[0], r[1], r[2]) for r in rows] == [("MONDO:0000002", "add", "name")]
+    assert [
+        (r.mondo_id, r.change.operation, r.change.predicate) for r in rows
+    ] == [("MONDO:0000002", "add", "name")]
 
 
 def test_diff_resolves_sha_and_seq_symmetrically(artifact: Path):
     db = HistoryDB(artifact)
-    a = db.changes_between("3", "4")
-    b = db.changes_between("4", "3")  # order shouldn't matter
+    a = db.range_events("3", "4")
+    b = db.range_events("4", "3")  # order shouldn't matter
     db.close()
     assert a == b
 
 
 def test_diff_accepts_head(artifact: Path):
     db = HistoryDB(artifact)
-    by_head = db.changes_between("v1.0", "HEAD")
-    by_seq = db.changes_between("v1.0", "4")
+    by_head = db.range_events("v1.0", "HEAD")
+    by_seq = db.range_events("v1.0", "4")
     db.close()
     assert by_head == by_seq
 
@@ -183,13 +185,15 @@ def test_pr_terms_from_message(artifact: Path):
     db.close()
 
 
-def test_commit_terms_lists_co_changed(artifact: Path):
+def test_commit_events_lists_co_changed(artifact: Path):
     db = HistoryDB(artifact)
     # find c4's sha, then ask what changed in it.
     sha = duckdb.connect().execute(
         f"SELECT sha FROM read_parquet('{artifact}/commits.parquet') WHERE commit_seq = 4"
     ).fetchone()[0]
-    terms = dict(db.commit_terms(sha))
+    head, events = db.commit_events(sha)
     db.close()
 
+    assert head is not None and head.sha == sha
+    terms = {tc.mondo_id for tc in events}
     assert "MONDO:0000002" in terms
