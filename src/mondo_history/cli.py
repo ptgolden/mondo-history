@@ -19,6 +19,18 @@ DEFAULT_PATH = "src/ontology/mondo-edit.obo"
 DEFAULT_ARTIFACT = Path("artifact")
 DEFAULT_URL = "https://github.com/monarch-initiative/mondo.git"
 DEFAULT_CLONE = Path("mondo-clone")
+# TODO: when build_meta learns to record the source URL, derive this from it
+# instead of hardcoding. For now this is fine because the artifact has only
+# ever been built against monarch-initiative/mondo.
+PR_URL_BASE = "https://github.com/monarch-initiative/mondo/pull/"
+
+
+def _print_pr_link(pr_number: int) -> None:
+    """Print a dim-cyan clickable URL to the PR, one indented line."""
+    url = f"{PR_URL_BASE}{pr_number}"
+    line = Text("    → ", style="dim")
+    line.append(url, style=f"link {url} dim cyan")
+    console.print(line)
 
 app = typer.Typer(add_completion=False, help="Build and query the Mondo history index.")
 console = Console()
@@ -234,6 +246,8 @@ def _render_timeline(
         # the artifact for filtering; we just don't render it twice here.
         header_line.append(head.message.splitlines()[0], style="dim")
         console.print(header_line)
+        if head.pr_number is not None:
+            _print_pr_link(head.pr_number)
         for op in render.pair_events(rows):
             console.print(render.render_op(op, truncate=cap))
 
@@ -304,6 +318,8 @@ def _render_commit_view(
         header_line.append(f"{head.author_name}  ", style="cyan")
     header_line.append(head.message.splitlines()[0], style="dim")
     console.print(header_line)
+    if head.pr_number is not None:
+        _print_pr_link(head.pr_number)
     n_terms = len({tc.mondo_id for tc in events})
     console.print(Text(f"{n_terms} terms changed", style="dim"))
 
@@ -357,6 +373,8 @@ def _render_diff_view(
                 commit_header.append(f"{head.author_name}  ", style="cyan")
             commit_header.append(head.message.splitlines()[0], style="dim")
             console.print(commit_header)
+            if head.pr_number is not None:
+                _print_pr_link(head.pr_number)
             changes = [tc.change for tc in commit_rows]
             for op in render.pair_events(changes):
                 console.print(render.render_op(op, truncate=cap))
