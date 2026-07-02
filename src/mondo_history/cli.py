@@ -242,8 +242,9 @@ def _render_timeline(
         header_line = Text("\n● ")
         header_line.append(head.sha[:7], style="bold yellow")
         header_line.append(f"  {_date(head.committed_date)}  ")
-        if head.pr_number is not None:
-            header_line.append(f"PR #{head.pr_number}  ", style="cyan")
+        # Mondo commit messages end with `(#N)`, so a styled PR badge would
+        # duplicate what's already in the subject line. pr_number stays in
+        # the artifact for filtering; we just don't render it twice here.
         header_line.append(head.message.splitlines()[0], style="dim")
         console.print(header_line)
         for op in render.pair_events(rows):
