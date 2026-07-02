@@ -30,6 +30,22 @@ class Change:
 
 
 @dataclass(frozen=True)
+class TermChange:
+    """A ``Change`` tagged with its term's id and display name.
+
+    Multi-term views (``commit``, ``diff``) enumerate events across many
+    terms, so callers need the term id per row and a display name for the
+    per-term section header. ``name`` is the term's name at the specific
+    event's commit (from ``term_snapshots``), or ``None`` if that snapshot
+    has no name (e.g. term-removal events).
+    """
+
+    mondo_id: str
+    name: str | None
+    change: Change
+
+
+@dataclass(frozen=True)
 class TermHeader:
     """Summary stats for a term, used to orient the timeline view."""
 
@@ -147,19 +163,50 @@ class HistoryDB:
             return []
         return [(c["predicate"], c["value"]) for c in row[0]]
 
-    def commit_terms(self, sha_prefix: str) -> list[tuple[str, str | None]]:
-        """Terms changed together in a commit (matched by sha prefix)."""
-        return self.con.execute(
+    def commit_events(
+        self, sha_prefix: str
+    ) -> tuple[Change | None, list[TermChange]]:
+        """Full events for one commit, plus a Change-shaped commit header row.
+
+        Returns ``(head, events)``. ``head`` is a ``Change`` whose commit-level
+        fields describe the matched commit (its operation/predicate/value are
+        empty placeholders — the CLI uses it purely for the ``sha/date/PR/message``
+        header). ``events`` is ordered by ``(mondo_id, operation, predicate, value)``
+        so ``groupby(events, key=mondo_id)`` gives per-term event lists directly
+        consumable by :func:`mondo_history.render.pair_events`.
+
+        Returns ``(None, [])`` when no commit matches the sha prefix.
+        """
+        row = self.con.execute(
+            """SELECT commit_seq, sha, committed_date, pr_number, message
+               FROM commits WHERE sha LIKE ? || '%' ORDER BY commit_seq LIMIT 1""",
+            [sha_prefix],
+        ).fetchone()
+        if row is None:
+            return None, []
+        commit_seq, sha, date, pr, message = row
+        head = Change(commit_seq, date, sha, pr, message, "", "", "")
+
+        rows = self.con.execute(
             """
-            SELECT DISTINCT e.mondo_id, s.name
+            SELECT e.mondo_id, s.name, e.operation, e.predicate, e.value
             FROM events e
             LEFT JOIN term_snapshots s
               ON s.mondo_id = e.mondo_id AND s.commit_seq = e.commit_seq
-            WHERE e.sha LIKE ? || '%'
-            ORDER BY e.mondo_id
+            WHERE e.commit_seq = ?
+            ORDER BY e.mondo_id, e.operation, e.predicate, e.value
             """,
-            [sha_prefix],
+            [commit_seq],
         ).fetchall()
+        events = [
+            TermChange(
+                mondo_id=mondo_id,
+                name=name,
+                change=Change(commit_seq, date, sha, pr, message, op, pred, val),
+            )
+            for mondo_id, name, op, pred, val in rows
+        ]
+        return head, events
 
     def pr_terms(self, pr_number: int) -> list[tuple[str, str | None]]:
         """Terms changed by any commit belonging to a pull request."""
@@ -195,12 +242,17 @@ class HistoryDB:
             raise KeyError(f"could not resolve ref {ref!r} to a commit")
         return row[0]
 
-    def changes_between(
+    def range_events(
         self, ref_a: str, ref_b: str, mondo_id: str | None = None
-    ) -> list[tuple[str, str, str, str, int, int | None]]:
-        """Clause changes in ``(lo, hi]`` where lo/hi are the two refs, ordered.
+    ) -> list[TermChange]:
+        """Events in ``(lo, hi]``, one row per clause change.
 
-        Returns ``(mondo_id, operation, predicate, value, commit_seq, pr_number)``.
+        ``lo``/``hi`` are the two refs (any of tag, short sha, HEAD, or
+        commit_seq — via :meth:`resolve_ref`), sorted so order doesn't matter.
+        Optionally restricted to one term. Rows are ordered by
+        ``(mondo_id, commit_seq, operation, predicate, value)`` so grouping
+        by term (then by commit within term) feeds directly into the render
+        pipeline.
         """
         lo, hi = sorted((self.resolve_ref(ref_a), self.resolve_ref(ref_b)))
         where = "e.commit_seq > ? AND e.commit_seq <= ?"
@@ -208,16 +260,28 @@ class HistoryDB:
         if mondo_id is not None:
             where += " AND e.mondo_id = ?"
             params.append(mondo_id)
-        return self.con.execute(
+        rows = self.con.execute(
             f"""
-            SELECT e.mondo_id, e.operation, e.predicate, e.value, e.commit_seq, c.pr_number
+            SELECT e.mondo_id, s.name,
+                   c.commit_seq, c.committed_date, c.sha, c.pr_number, c.message,
+                   e.operation, e.predicate, e.value
             FROM events e
             JOIN commits c USING (commit_seq)
+            LEFT JOIN term_snapshots s
+              ON s.mondo_id = e.mondo_id AND s.commit_seq = e.commit_seq
             WHERE {where}
-            ORDER BY e.mondo_id, e.commit_seq, e.operation, e.predicate
+            ORDER BY e.mondo_id, c.commit_seq, e.operation, e.predicate, e.value
             """,
             params,
         ).fetchall()
+        return [
+            TermChange(
+                mondo_id=mondo_id,
+                name=name,
+                change=Change(seq, date, sha, pr, message, op, pred, val),
+            )
+            for mondo_id, name, seq, date, sha, pr, message, op, pred, val in rows
+        ]
 
     def releases(self) -> list[tuple[str, int, object]]:
         if not self._has_releases():

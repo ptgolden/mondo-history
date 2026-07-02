@@ -13,7 +13,7 @@ from . import render
 from .extract import build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
-from .query import ArtifactNotFound, Change, HistoryDB, TermHeader
+from .query import ArtifactNotFound, Change, HistoryDB, TermChange, TermHeader
 
 DEFAULT_PATH = "src/ontology/mondo-edit.obo"
 DEFAULT_ARTIFACT = Path("artifact")
@@ -127,20 +127,16 @@ def term(
 def commit(
     sha: str = typer.Argument(..., help="Commit sha or unique prefix."),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
-    """List the terms changed together in one commit."""
+    """Show what changed at one commit, structurally rendered per term."""
     db = _open(artifact)
-    terms = db.commit_terms(sha)
-    if not terms:
+    head, events = db.commit_events(sha)
+    if head is None:
         console.print(f"[yellow]No indexed changes for commit[/] {sha}")
-    else:
-        console.print(f"[bold]{len(terms)}[/] terms changed in {sha}:")
-        for mondo_id, name in terms:
-            line = Text("  ")
-            line.append(mondo_id, style="cyan")
-            if name:
-                line.append(f"  {name}", style="dim")
-            console.print(line)
+        db.close()
+        return
+    _render_commit_view(head, events, full=full)
     db.close()
 
 
@@ -167,31 +163,20 @@ def pr(
 
 @app.command()
 def diff(
-    ref_a: str = typer.Argument(..., help="Release tag, commit_seq, or sha."),
-    ref_b: str = typer.Argument(..., help="Release tag, commit_seq, or sha."),
+    ref_a: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
+    ref_b: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
+    full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
-    """Show clause changes between two points (e.g. two releases)."""
+    """Show clause changes between two points, grouped by term and commit."""
     db = _open(artifact)
-    rows = db.changes_between(ref_a, ref_b, mondo_id=term)
-    if not rows:
+    events = db.range_events(ref_a, ref_b, mondo_id=term)
+    if not events:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
         return
-    n_terms = len({r[0] for r in rows})
-    console.print(
-        f"[bold]{len(rows)}[/] changes across [bold]{n_terms}[/] terms "
-        f"between {ref_a} and {ref_b}:"
-    )
-    for mondo_id, group in groupby(rows, key=lambda r: r[0]):
-        console.print(Text(mondo_id, style="bold cyan"))
-        for _, operation, predicate, value, _seq, _pr in group:
-            line = Text("    ")
-            line.append("+ " if operation == "add" else "- ",
-                        style="bold green" if operation == "add" else "bold red")
-            line.append(f"{predicate}: {value}")
-            console.print(line)
+    _render_diff_view(ref_a, ref_b, events, full=full)
     db.close()
 
 
@@ -304,6 +289,71 @@ def _render_header(
         parts = [f"{p} {n}" for p, n in counts.most_common()]
         by_pred.append(", ".join(parts), style="dim")
         console.print(by_pred)
+
+
+def _render_commit_view(
+    head: Change, events: list[TermChange], full: bool = False
+) -> None:
+    """Structural view of one commit: header + per-term event groups."""
+    header_line = Text("● ")
+    header_line.append(head.sha[:7], style="bold yellow")
+    header_line.append(f"  {_date(head.committed_date)}  ")
+    header_line.append(head.message.splitlines()[0], style="dim")
+    console.print(header_line)
+    n_terms = len({tc.mondo_id for tc in events})
+    console.print(Text(f"{n_terms} terms changed", style="dim"))
+
+    cap = None if full else render.DEFAULT_TRUNCATE
+    for mondo_id, group in groupby(events, key=lambda tc: tc.mondo_id):
+        rows = list(group)
+        title = Text("\n")
+        title.append(mondo_id, style="bold cyan")
+        if rows[0].name:
+            title.append(f" — {rows[0].name}", style="bold")
+        console.print(title)
+        changes = [tc.change for tc in rows]
+        for op in render.pair_events(changes):
+            console.print(render.render_op(op, truncate=cap))
+
+
+def _render_diff_view(
+    ref_a: str, ref_b: str, events: list[TermChange], full: bool = False
+) -> None:
+    """Structural view of a range diff: per-term sections, per-commit sub-groups."""
+    n_terms = len({tc.mondo_id for tc in events})
+    n_commits = len({tc.change.commit_seq for tc in events})
+    summary = Text()
+    summary.append(f"{len(events)}", style="bold")
+    summary.append(f" events across ", style="dim")
+    summary.append(f"{n_terms}", style="bold")
+    summary.append(f" terms and ", style="dim")
+    summary.append(f"{n_commits}", style="bold")
+    summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
+    console.print(summary)
+
+    cap = None if full else render.DEFAULT_TRUNCATE
+    for mondo_id, term_group in groupby(events, key=lambda tc: tc.mondo_id):
+        term_rows = list(term_group)
+        title = Text("\n")
+        title.append(mondo_id, style="bold cyan")
+        # Take the most recent name we saw in the range as the section header.
+        latest_name = next(
+            (tc.name for tc in reversed(term_rows) if tc.name is not None), None
+        )
+        if latest_name:
+            title.append(f" — {latest_name}", style="bold")
+        console.print(title)
+        for _, commit_group in groupby(term_rows, key=lambda tc: tc.change.commit_seq):
+            commit_rows = list(commit_group)
+            head = commit_rows[0].change
+            commit_header = Text("  ● ")
+            commit_header.append(head.sha[:7], style="bold yellow")
+            commit_header.append(f"  {_date(head.committed_date)}  ")
+            commit_header.append(head.message.splitlines()[0], style="dim")
+            console.print(commit_header)
+            changes = [tc.change for tc in commit_rows]
+            for op in render.pair_events(changes):
+                console.print(render.render_op(op, truncate=cap))
 
 
 def _render_state(mondo_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
