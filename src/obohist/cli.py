@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.text import Text
 
 from . import render
+from .config import Config, ConfigError, SourceConfig, load_config
 from .extract import build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
@@ -19,9 +20,9 @@ DEFAULT_PATH = "src/ontology/mondo-edit.obo"
 DEFAULT_ARTIFACT = Path("artifact")
 DEFAULT_URL = "https://github.com/monarch-initiative/mondo.git"
 DEFAULT_CLONE = Path("mondo-clone")
-# TODO: when build_meta learns to record the source URL, derive this from it
-# instead of hardcoding. For now this is fine because the artifact has only
-# ever been built against monarch-initiative/mondo.
+# TODO: derive the PR-link base URL from the source's repo config once the
+# source subcommand group lands. For now, hardcoded to Mondo — this URL only
+# gets used for PR # → link decoration and Mondo is the only real artifact.
 PR_URL_BASE = "https://github.com/monarch-initiative/mondo/pull/"
 
 
@@ -43,6 +44,21 @@ def _open(artifact: Path) -> HistoryDB:
     except ArtifactNotFound as err:
         console.print(f"[red]{err}[/]")
         raise typer.Exit(1)
+
+
+def _resolve_source(source: str, config: Optional[Path]) -> SourceConfig:
+    """Load the config file and look up the requested source; exit on error."""
+    try:
+        cfg = load_config(config)
+        return cfg.get_source(source)
+    except ConfigError as err:
+        console.print(f"[red]{err}[/]")
+        raise typer.Exit(1)
+
+
+def _open_source(source: str, config: Optional[Path]) -> HistoryDB:
+    """Combine config lookup and DB open into one call for query commands."""
+    return _open(_resolve_source(source, config).db_dir)
 
 
 @app.command()
@@ -106,7 +122,8 @@ def _ensure_clone(url: str, since: Optional[str], clone_dir: Path, repo: Optiona
 @app.command()
 def term(
     term_id: str = typer.Argument(..., help="e.g. MONDO:0007739"),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name (see obohist source list)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml (default: ./obohist.toml)."),
     only: Optional[str] = typer.Option(None, help="Restrict to one clause kind, e.g. synonym."),
     at: Optional[str] = typer.Option(
         None, help="Reconstruct state as of this ref (short sha, tag, or commit_seq)."
@@ -120,7 +137,7 @@ def term(
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Show a term's change history, or its reconstructed state at a point."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     if at is not None:
         at_seq = db.resolve_ref(at)
         _render_state(term_id, at, db.term_at(term_id, at_seq))
@@ -138,14 +155,15 @@ def term(
 @app.command()
 def commit(
     sha: str = typer.Argument(..., help="Commit sha or unique prefix."),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
     namespace: Optional[str] = typer.Option(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Show what changed at one commit, structurally rendered per term."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     head, events = db.commit_events(sha, namespace=namespace)
     if head is None:
         console.print(f"[yellow]No indexed changes for commit[/] {sha}")
@@ -158,10 +176,11 @@ def commit(
 @app.command()
 def pr(
     number: int = typer.Argument(..., help="Pull request number, e.g. 10343."),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
 ):
     """List the terms changed by a pull request."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     terms = db.pr_terms(number)
     if not terms:
         console.print(f"[yellow]No indexed changes for PR[/] #{number}")
@@ -180,7 +199,8 @@ def pr(
 def diff(
     ref_a: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
     ref_b: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
     namespace: Optional[str] = typer.Option(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
@@ -188,7 +208,7 @@ def diff(
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Show clause changes between two points, grouped by term and commit."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     events = db.range_events(ref_a, ref_b, term_id=term, namespace=namespace)
     if not events:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
@@ -201,7 +221,8 @@ def diff(
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Substring (or regex, with --regex) to match in event values."),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
     predicate: Optional[str] = typer.Option(
         None, help="Restrict to one clause kind, e.g. xref."
@@ -219,7 +240,7 @@ def search(
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Find commits that added or removed a clause matching QUERY."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     since_seq = db.resolve_ref(since) if since is not None else None
     events = db.search_events(
         query, term_id=term, predicate=predicate, since_seq=since_seq,
@@ -234,9 +255,12 @@ def search(
 
 
 @app.command()
-def releases(artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory.")):
-    """List release tags indexed in this artifact."""
-    db = _open(artifact)
+def releases(
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+):
+    """List release tags indexed for a source."""
+    db = _open_source(source, config)
     rows = db.releases()
     db.close()
     if not rows:

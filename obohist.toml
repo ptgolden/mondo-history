@@ -1,0 +1,5 @@
+storage = "./data"
+
+[source.mondo]
+repo = "https://github.com/monarch-initiative/mondo"
+file = "src/ontology/mondo-edit.obo"
