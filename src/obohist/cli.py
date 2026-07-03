@@ -30,6 +30,23 @@ def _print_pr_link(pr_number: int) -> None:
     line.append(url, style=f"link {url} dim cyan")
     console.print(line)
 
+
+def _print_branch_commits(branch_commits) -> None:
+    """Print one line per PR-branch commit under a merge commit's header.
+
+    Newest first (matching what a reader sees on GitHub); short sha + subject
+    line only. For a typical PR-branch this is 1–3 lines that give the real
+    editorial intent, since the mainline header just says
+    "Merge pull request #N from ...".
+    """
+    for bc in branch_commits:
+        line = Text("    ⤷ ", style="dim")
+        line.append(bc.sha[:7], style="yellow")
+        line.append("  ", style="dim")
+        subject = bc.message.splitlines()[0] if bc.message else ""
+        line.append(subject, style="dim")
+        console.print(line)
+
 app = typer.Typer(add_completion=False, help="Build and query an OBO ontology history index.")
 console = Console()
 
@@ -411,6 +428,8 @@ def _render_timeline(
         console.print(header_line)
         if head.pr_number is not None:
             _print_pr_link(head.pr_number)
+        if head.branch_commits:
+            _print_branch_commits(head.branch_commits)
         for op in render.pair_events(rows):
             console.print(render.render_op(op, truncate=cap))
 
@@ -483,6 +502,8 @@ def _render_commit_view(
     console.print(header_line)
     if head.pr_number is not None:
         _print_pr_link(head.pr_number)
+    if head.branch_commits:
+        _print_branch_commits(head.branch_commits)
     n_terms = len({tc.term_id for tc in events})
     console.print(Text(f"{n_terms} terms changed", style="dim"))
 
@@ -617,6 +638,8 @@ def _render_events_by_term_and_commit(
             console.print(commit_header)
             if head.pr_number is not None:
                 _print_pr_link(head.pr_number)
+            if head.branch_commits:
+                _print_branch_commits(head.branch_commits)
             changes = [tc.change for tc in commit_rows]
             for op in render.pair_events(changes):
                 console.print(render.render_op(op, truncate=cap))

@@ -28,6 +28,16 @@ _NULL_OID = "0" * 40
 
 
 @dataclass(frozen=True)
+class BranchCommit:
+    """One commit on the merged branch of a merge commit (typically a PR)."""
+
+    sha: str
+    author_name: str
+    committed_date: datetime  # timezone-aware
+    message: str
+
+
+@dataclass(frozen=True)
 class CommitInfo:
     """Git metadata for one commit that touched the followed file."""
 
@@ -38,6 +48,7 @@ class CommitInfo:
     committed_date: datetime  # timezone-aware
     parent_sha: str | None  # first parent, or None at a root commit
     message: str
+    branch_commits: tuple["BranchCommit", ...] = ()  # newest-first, empty for non-merges
 
 
 @dataclass(frozen=True)
@@ -151,6 +162,14 @@ class GitSource:
             at_path, blob_oid = ref
             if blob_oid == _NULL_OID:
                 continue  # file removed at this commit; nothing to snapshot
+            branch_commits: tuple[BranchCommit, ...] = ()
+            if commit.parent_sha and commit.second_parent_sha:
+                # A merge: capture the commits on the merged branch (usually
+                # the PR-branch commits, in newest-first order matching what
+                # the reader sees on GitHub).
+                branch_commits = self.read_branch_commits(
+                    commit.parent_sha, commit.second_parent_sha
+                )
             yield FileVersion(
                 commit=CommitInfo(
                     seq=seq,
@@ -160,6 +179,7 @@ class GitSource:
                     committed_date=commit.committed_date,
                     parent_sha=commit.parent_sha,
                     message=commit.message,
+                    branch_commits=branch_commits,
                 ),
                 path=at_path,
                 blob_oid=blob_oid,
@@ -245,18 +265,62 @@ class GitSource:
             if not record:
                 continue
             sha, an, ae, adate, parents, message = record.split(_FIELD)
+            parts = parents.split(" ") if parents else []
             commits.append(
                 _RawCommit(
                     sha=sha,
                     author_name=an,
                     author_email=ae,
                     committed_date=datetime.fromisoformat(adate),
-                    parent_sha=parents.split(" ")[0] if parents else None,
+                    parent_sha=parts[0] if parts else None,
+                    second_parent_sha=parts[1] if len(parts) > 1 else None,
                     message=message.strip(),
                 )
             )
         commits.reverse()  # oldest first
         return commits
+
+    def read_branch_commits(
+        self, first_parent: str, second_parent: str
+    ) -> tuple["BranchCommit", ...]:
+        """Commits reachable from ``second_parent`` but not from ``first_parent``.
+
+        These are the individual commits that landed as part of a merge — for
+        a GitHub-merged PR, the PR-branch commits in the order they'll be
+        listed on the PR page. Returned newest-first so the tip (typically the
+        one with the most descriptive final message) is prominent.
+        """
+        fmt = _FIELD.join(["%H", "%an", "%aI", "%B"]) + _RECORD
+        try:
+            out = _run(
+                [
+                    "git", "log",
+                    "--no-merges",
+                    f"--format={fmt}",
+                    f"{first_parent}..{second_parent}",
+                ],
+                cwd=self.repo_dir,
+            )
+        except GitError:
+            # A missing branch (shallow clone, or a rewritten ref) shouldn't
+            # crash the build — just return nothing and let the merge show as
+            # a bare merge commit.
+            return ()
+        out_list: list[BranchCommit] = []
+        for record in out.split(_RECORD):
+            record = record.strip("\n")
+            if not record:
+                continue
+            sha, an, adate, message = record.split(_FIELD)
+            out_list.append(
+                BranchCommit(
+                    sha=sha,
+                    author_name=an,
+                    committed_date=datetime.fromisoformat(adate),
+                    message=message.strip(),
+                )
+            )
+        return tuple(out_list)
 
     def _read_blob_refs(self, path: str) -> dict[str, tuple[str, str]]:
         """Map each commit sha to (path_at_commit, blob_oid) via ``--raw``.
@@ -309,6 +373,7 @@ class _RawCommit:
     author_email: str
     committed_date: datetime
     parent_sha: str | None
+    second_parent_sha: str | None  # set when this is a merge (2+ parents)
     message: str
 
 

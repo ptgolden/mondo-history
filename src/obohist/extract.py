@@ -162,6 +162,15 @@ def _commit_row(commit: CommitInfo) -> dict:
         "message": commit.message,
         "pr_number": int(match.group(1)) if match else None,
         "parent_sha": commit.parent_sha,
+        "branch_commits": [
+            {
+                "sha": bc.sha,
+                "author_name": bc.author_name,
+                "committed_date": bc.committed_date.astimezone(timezone.utc).replace(tzinfo=None),
+                "message": bc.message,
+            }
+            for bc in commit.branch_commits
+        ],
     }
 
 
