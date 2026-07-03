@@ -37,7 +37,7 @@ COMMITS = pa.schema(
 
 TERM_SNAPSHOTS = pa.schema(
     [
-        ("mondo_id", pa.string()),
+        ("term_id", pa.string()),
         ("commit_seq", pa.int32()),
         ("sha", pa.string()),
         ("name", pa.string()),  # nullable convenience column
@@ -49,7 +49,7 @@ TERM_SNAPSHOTS = pa.schema(
 
 EVENTS = pa.schema(
     [
-        ("mondo_id", pa.string()),
+        ("term_id", pa.string()),
         ("commit_seq", pa.int32()),
         ("sha", pa.string()),
         ("predicate", pa.string()),
@@ -71,7 +71,7 @@ SKIPPED = pa.schema(
     [
         ("commit_seq", pa.int32()),
         ("sha", pa.string()),
-        ("mondo_id", pa.string()),  # the single term whose stanza failed to parse
+        ("term_id", pa.string()),  # the single term whose stanza failed to parse
         ("error", pa.string()),
     ]
 )

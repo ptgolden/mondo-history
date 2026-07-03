@@ -12,6 +12,7 @@ import re
 from mondo_history.query import Change
 from mondo_history.render import (
     DEFAULT_TRUNCATE,
+    edit_delta_matches,
     Add,
     Edit,
     Remove,
@@ -408,3 +409,93 @@ def test_full_disables_truncate():
     line = render_op(Add(_change("add", "def", long)), truncate=None)
     assert "…" not in line.plain
     assert long in line.plain
+
+
+# ---------------------------------------------------------------------------
+# edit_delta_matches — the clause-aware search filter. Determines whether a
+# paired Edit's *delta* (body-diff, comment-diff, qualifier symmetric
+# difference) contains the query. Kept-unchanged qualifiers do not count.
+
+
+def _edit(before_val: str, after_val: str, predicate: str = "is_a") -> Edit:
+    return Edit(
+        predicate=predicate,
+        before=_change("remove", predicate, before_val),
+        after=_change("add", predicate, after_val),
+    )
+
+
+def test_edit_delta_matches_only_in_kept_qualifier_returns_false():
+    # Regression from real-artifact commit 4533f68 on MONDO:0011996: body and
+    # comment are unchanged; ONCOTREE:CML is present on both sides (a kept
+    # qualifier); the only actual delta is "+ source=indirect". Query "CML"
+    # does not appear in the delta.
+    kept = 'source="ONCOTREE:CML"'
+    before = 'MONDO:0020076 {source="EFO:0000339", ' + kept + '} ! neoplasm'
+    after = (
+        'MONDO:0020076 {source="EFO:0000339", ' + kept
+        + ', source="indirect"} ! neoplasm'
+    )
+    assert edit_delta_matches(_edit(before, after), "CML") is False
+
+
+def test_edit_delta_matches_added_qualifier_returns_true():
+    # Same base, add a new qualifier that contains the query.
+    before = 'MONDO:0020076 {source="A"}'
+    after = 'MONDO:0020076 {source="A", source="ONCOTREE:CML"}'
+    assert edit_delta_matches(_edit(before, after), "CML") is True
+
+
+def test_edit_delta_matches_removed_qualifier_returns_true():
+    # Same base, remove a qualifier that contained the query.
+    before = 'MONDO:0020076 {source="A", source="ONCOTREE:CML"}'
+    after = 'MONDO:0020076 {source="A"}'
+    assert edit_delta_matches(_edit(before, after), "CML") is True
+
+
+def test_edit_delta_matches_body_change_returns_true():
+    # Body changed; the query appears in the new body.
+    assert edit_delta_matches(_edit("MONDO:0000001", "MONDO:0000002"), "0002") is True
+
+
+def test_edit_delta_matches_kept_token_inside_edited_body_returns_false():
+    # Real case from `mondo-history search C317`: a synonym's evidence list
+    # had CSP2005:2004-1700 removed. NCIT:C3174 stayed put but happens to
+    # contain the substring "C317". The commit didn't actually change
+    # anything involving C317 — that xref reference was unchanged context
+    # inside an edited body.
+    before = (
+        '"CML" EXACT ABBREVIATION [CSP2005:2004-1700, DOID:8552, '
+        'NCIT:C3174, OMIM:608232]'
+    )
+    after = '"CML" EXACT ABBREVIATION [DOID:8552, NCIT:C3174, OMIM:608232]'
+    # Body differs (CSP evidence removed). NCIT:C3174 is present on both
+    # sides — a kept token. C317 doesn't appear in the changed tokens.
+    assert edit_delta_matches(_edit(before, after, "synonym"), "C317") is False
+    # But a query that matches the changed token (or any part of it) hits.
+    assert edit_delta_matches(_edit(before, after, "synonym"), "CSP2005") is True
+
+
+def test_edit_delta_matches_comment_change_returns_true():
+    # Body + qualifiers identical; only the ! comment differs and it contains
+    # the query.
+    before = 'MONDO:0020076 {source="A"} ! old name'
+    after = 'MONDO:0020076 {source="A"} ! new CML name'
+    assert edit_delta_matches(_edit(before, after), "CML") is True
+
+
+def test_edit_delta_matches_regex_ignore_case():
+    # Regex + ignore-case: query pattern with lowercase word-boundary matches
+    # an uppercase CML in the added qualifier.
+    before = 'MONDO:0020076 {source="A"}'
+    after = 'MONDO:0020076 {source="A", source="ONCOTREE:CML"}'
+    assert edit_delta_matches(
+        _edit(before, after), r"\bcml\b", regex=True, ignore_case=True
+    ) is True
+
+
+def test_edit_delta_matches_unparseable_falls_through_to_true():
+    # If fastobo can't parse either side, we return True as a safe default so
+    # historical malformed clauses stay visible in search results.
+    weird = 'not a real OBO clause {{{ garbage'
+    assert edit_delta_matches(_edit(weird, weird), "anything") is True

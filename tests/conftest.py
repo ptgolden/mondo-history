@@ -9,8 +9,8 @@ import pytest
 HEADER = "format-version: 1.2\n\n"
 
 
-def _term(mondo_id: str, *clauses: str) -> str:
-    body = "\n".join([f"id: {mondo_id}", *clauses])
+def _term(term_id: str, *clauses: str) -> str:
+    body = "\n".join([f"id: {term_id}", *clauses])
     return f"[Term]\n{body}\n"
 
 

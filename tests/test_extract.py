@@ -36,8 +36,8 @@ def test_parallel_build_matches_single(obo_repo: Path, tmp_path: Path):
     build_parallel(str(obo_repo), OBO, parallel, jobs=3)
 
     ds, dp = HistoryDB(single), HistoryDB(parallel)
-    ev_cols = "mondo_id, commit_seq, operation, predicate, value"
-    sn_cols = "mondo_id, commit_seq, content_hash"
+    ev_cols = "term_id, commit_seq, operation, predicate, value"
+    sn_cols = "term_id, commit_seq, content_hash"
     assert _multiset(ds, "events", ev_cols) == _multiset(dp, "events", ev_cols)
     assert _multiset(ds, "term_snapshots", sn_cols) == _multiset(dp, "term_snapshots", sn_cols)
     ds.close()
@@ -53,7 +53,7 @@ def test_chunk_size_does_not_change_output(obo_repo: Path, tmp_path: Path):
     build_parallel(str(obo_repo), OBO, many, jobs=2, chunk_size=1)
 
     ds, dm = HistoryDB(single), HistoryDB(many)
-    cols = "mondo_id, commit_seq, operation, predicate, value"
+    cols = "term_id, commit_seq, operation, predicate, value"
     assert _multiset(ds, "events", cols) == _multiset(dm, "events", cols)
     ds.close()
     dm.close()
@@ -79,9 +79,9 @@ def test_removing_an_unparseable_term_does_not_crash(bad_then_removed_repo: Path
 
     db = HistoryDB(out)
     good = db.con.execute(
-        "SELECT count(*) FROM term_snapshots WHERE mondo_id = 'MONDO:0000001'"
+        "SELECT count(*) FROM term_snapshots WHERE term_id = 'MONDO:0000001'"
     ).fetchone()[0]
-    skipped_ids = {r[0] for r in db.con.execute("SELECT DISTINCT mondo_id FROM skipped").fetchall()}
+    skipped_ids = {r[0] for r in db.con.execute("SELECT DISTINCT term_id FROM skipped").fetchall()}
     db.close()
 
     assert good >= 1  # the good term is indexed
@@ -158,7 +158,7 @@ def test_diff_between_release_and_head(artifact: Path):
     rows = db.range_events("v1.0", "4")
     db.close()
     assert [
-        (r.mondo_id, r.change.operation, r.change.predicate) for r in rows
+        (r.term_id, r.change.operation, r.change.predicate) for r in rows
     ] == [("MONDO:0000002", "add", "name")]
 
 
@@ -195,5 +195,139 @@ def test_commit_events_lists_co_changed(artifact: Path):
     db.close()
 
     assert head is not None and head.sha == sha
-    terms = {tc.mondo_id for tc in events}
+    terms = {tc.term_id for tc in events}
     assert "MONDO:0000002" in terms
+
+
+def test_search_events_finds_substring(artifact: Path):
+    # The "illness" synonym was added on c1 for MONDO:0000001.
+    db = HistoryDB(artifact)
+    events = db.search_events("illness")
+    db.close()
+    assert len(events) == 1
+    assert events[0].term_id == "MONDO:0000001"
+    assert events[0].change.operation == "add"
+    assert events[0].change.predicate == "synonym"
+    assert "illness" in events[0].change.value
+
+
+def test_search_events_empty_when_no_match(artifact: Path):
+    db = HistoryDB(artifact)
+    assert db.search_events("nonexistent-string-that-cannot-occur") == []
+    db.close()
+
+
+def test_search_events_predicate_filter_narrows(artifact: Path):
+    # DOID:4 was added as an xref on c3. Filtering by predicate=xref keeps it;
+    # filtering by predicate=synonym drops it even though it's the same needle.
+    db = HistoryDB(artifact)
+    xrefs = db.search_events("DOID:4", predicate="xref")
+    synonyms = db.search_events("DOID:4", predicate="synonym")
+    db.close()
+    assert len(xrefs) == 1 and xrefs[0].change.predicate == "xref"
+    assert synonyms == []
+
+
+def test_search_events_term_filter_narrows(artifact: Path):
+    # MONDO:0000002 is created at c4 with `name: cancer` — that lands in the
+    # events table because c4 is diffed against c3 (which had no such term).
+    # Restricting to MONDO:0000002 keeps the hit; restricting to a term
+    # without the string drops it.
+    db = HistoryDB(artifact)
+    hits = db.search_events("cancer", term_id="MONDO:0000002")
+    off_term = db.search_events("cancer", term_id="MONDO:0000001")
+    db.close()
+    assert len(hits) == 1
+    assert hits[0].term_id == "MONDO:0000002"
+    assert hits[0].change.predicate == "name"
+    assert off_term == []
+
+
+def test_search_events_since_filter_cuts_off_early_commits(artifact: Path):
+    # The "illness" synonym was added on c1 (commit_seq 1). A --since cutoff
+    # of seq 2 must exclude it.
+    db = HistoryDB(artifact)
+    all_hits = db.search_events("illness")
+    after_c1 = db.search_events("illness", since_seq=2)
+    db.close()
+    assert len(all_hits) == 1
+    assert after_c1 == []
+
+
+def test_search_events_ignore_case_substring(artifact: Path):
+    # "ILLNESS" (all caps) matches the "illness" synonym under --ignore-case;
+    # without the flag, it doesn't.
+    db = HistoryDB(artifact)
+    sensitive = db.search_events("ILLNESS")
+    insensitive = db.search_events("ILLNESS", ignore_case=True)
+    db.close()
+    assert sensitive == []
+    assert len(insensitive) == 1
+    assert insensitive[0].change.predicate == "synonym"
+
+
+def test_search_events_regex_matches(artifact: Path):
+    # The DOID:4 xref matches ^DOID:\d+$; the OMIM-style patterns don't.
+    db = HistoryDB(artifact)
+    doid_hits = db.search_events(r"^DOID:\d+$", regex=True)
+    omim_hits = db.search_events(r"^OMIM:\d+$", regex=True)
+    db.close()
+    assert len(doid_hits) == 1
+    assert doid_hits[0].change.predicate == "xref"
+    assert doid_hits[0].change.value == "DOID:4"
+    assert omim_hits == []
+
+
+def test_search_events_regex_ignore_case_combined(artifact: Path):
+    # Regex + --ignore-case: DOID uppercase pattern still matches even if the
+    # regex uses lowercase. Both flags combine via the 'i' option to
+    # regexp_matches.
+    db = HistoryDB(artifact)
+    sensitive = db.search_events(r"^doid:\d+$", regex=True)
+    insensitive = db.search_events(r"^doid:\d+$", regex=True, ignore_case=True)
+    db.close()
+    assert sensitive == []
+    assert len(insensitive) == 1
+    assert insensitive[0].change.value == "DOID:4"
+
+
+def test_search_events_namespace_filter_keeps_matching_prefix(artifact: Path):
+    # The fixture has only MONDO: term_ids, so namespace="MONDO" is a no-op
+    # from a "which rows" perspective — but the SQL wire-up must be right.
+    db = HistoryDB(artifact)
+    unfiltered = db.search_events("cancer")
+    with_ns = db.search_events("cancer", namespace="MONDO")
+    db.close()
+    assert with_ns == unfiltered
+    assert len(with_ns) >= 1
+
+
+def test_search_events_namespace_filter_excludes_other_prefixes(artifact: Path):
+    db = HistoryDB(artifact)
+    hits = db.search_events("cancer", namespace="FOO")
+    db.close()
+    assert hits == []
+
+
+def test_range_events_namespace_filter(artifact: Path):
+    db = HistoryDB(artifact)
+    unfiltered = db.range_events("v1.0", "HEAD")
+    with_ns = db.range_events("v1.0", "HEAD", namespace="MONDO")
+    empty = db.range_events("v1.0", "HEAD", namespace="FOO")
+    db.close()
+    assert with_ns == unfiltered
+    assert empty == []
+
+
+def test_commit_events_namespace_filter(artifact: Path):
+    db = HistoryDB(artifact)
+    sha = duckdb.connect().execute(
+        f"SELECT sha FROM read_parquet('{artifact}/commits.parquet') WHERE commit_seq = 4"
+    ).fetchone()[0]
+    head_a, events_a = db.commit_events(sha)
+    head_b, events_b = db.commit_events(sha, namespace="MONDO")
+    _, events_empty = db.commit_events(sha, namespace="FOO")
+    db.close()
+    assert head_a is not None and head_b is not None
+    assert events_a == events_b
+    assert events_empty == []

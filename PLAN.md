@@ -189,7 +189,7 @@ The representation is now decided:
   frame). Reconstructing a term at any point is "the latest snapshot at or before
   that commit."
 * **Clause-level events are derived** by diffing adjacent snapshots of a term:
-  `(mondo_id, commit_seq, predicate, value, add|remove)`. This is the queryable
+  `(term_id, commit_seq, predicate, value, add|remove)`. This is the queryable
   spine for "when did this synonym / xref / parent change." A term's creation and
   removal are recoverable from snapshot presence, so they need no dedicated event
   kind.

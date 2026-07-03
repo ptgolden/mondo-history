@@ -105,7 +105,7 @@ def _ensure_clone(url: str, since: Optional[str], clone_dir: Path, repo: Optiona
 
 @app.command()
 def term(
-    mondo_id: str = typer.Argument(..., help="e.g. MONDO:0007739"),
+    term_id: str = typer.Argument(..., help="e.g. MONDO:0007739"),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
     only: Optional[str] = typer.Option(None, help="Restrict to one clause kind, e.g. synonym."),
     at: Optional[str] = typer.Option(
@@ -123,13 +123,13 @@ def term(
     db = _open(artifact)
     if at is not None:
         at_seq = db.resolve_ref(at)
-        _render_state(mondo_id, at, db.term_at(mondo_id, at_seq))
+        _render_state(term_id, at, db.term_at(term_id, at_seq))
     else:
-        header = db.term_header(mondo_id)
-        changes = db.term_timeline(mondo_id, predicate=only)
+        header = db.term_header(term_id)
+        changes = db.term_timeline(term_id, predicate=only)
         since_seq = db.resolve_ref(since) if since is not None else None
         _render_timeline(
-            mondo_id, header, changes,
+            term_id, header, changes,
             limit=limit, since_seq=since_seq, full=full,
         )
     db.close()
@@ -139,11 +139,14 @@ def term(
 def commit(
     sha: str = typer.Argument(..., help="Commit sha or unique prefix."),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    namespace: Optional[str] = typer.Option(
+        None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
+    ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Show what changed at one commit, structurally rendered per term."""
     db = _open(artifact)
-    head, events = db.commit_events(sha)
+    head, events = db.commit_events(sha, namespace=namespace)
     if head is None:
         console.print(f"[yellow]No indexed changes for commit[/] {sha}")
         db.close()
@@ -164,9 +167,9 @@ def pr(
         console.print(f"[yellow]No indexed changes for PR[/] #{number}")
     else:
         console.print(f"[bold]{len(terms)}[/] terms changed in PR #{number}:")
-        for mondo_id, name in terms:
+        for term_id, name in terms:
             line = Text("  ")
-            line.append(mondo_id, style="cyan")
+            line.append(term_id, style="cyan")
             if name:
                 line.append(f"  {name}", style="dim")
             console.print(line)
@@ -179,16 +182,54 @@ def diff(
     ref_b: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
+    namespace: Optional[str] = typer.Option(
+        None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
+    ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Show clause changes between two points, grouped by term and commit."""
     db = _open(artifact)
-    events = db.range_events(ref_a, ref_b, mondo_id=term)
+    events = db.range_events(ref_a, ref_b, term_id=term, namespace=namespace)
     if not events:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
         return
     _render_diff_view(ref_a, ref_b, events, full=full)
+    db.close()
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Substring (or regex, with --regex) to match in event values."),
+    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    term: Optional[str] = typer.Option(None, help="Restrict to one term."),
+    predicate: Optional[str] = typer.Option(
+        None, help="Restrict to one clause kind, e.g. xref."
+    ),
+    namespace: Optional[str] = typer.Option(
+        None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
+    ),
+    since: Optional[str] = typer.Option(
+        None, help="Show events at/after this ref (short sha, tag, or commit_seq)."
+    ),
+    regex: bool = typer.Option(False, "--regex", help="Treat QUERY as a regular expression."),
+    ignore_case: bool = typer.Option(
+        False, "--ignore-case", "-i", help="Case-insensitive match."
+    ),
+    full: bool = typer.Option(False, help="Do not truncate long values."),
+):
+    """Find commits that added or removed a clause matching QUERY."""
+    db = _open(artifact)
+    since_seq = db.resolve_ref(since) if since is not None else None
+    events = db.search_events(
+        query, term_id=term, predicate=predicate, since_seq=since_seq,
+        regex=regex, ignore_case=ignore_case, namespace=namespace,
+    )
+    if not events:
+        console.print(f'[yellow]No events matching[/] "{query}"')
+        db.close()
+        return
+    _render_search_view(query, events, regex=regex, ignore_case=ignore_case, full=full)
     db.close()
 
 
@@ -209,7 +250,7 @@ def releases(artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact dire
 
 
 def _render_timeline(
-    mondo_id: str,
+    term_id: str,
     header: TermHeader | None,
     changes: list[Change],
     limit: int | None = None,
@@ -217,7 +258,7 @@ def _render_timeline(
     full: bool = False,
 ) -> None:
     if not changes:
-        console.print(f"[yellow]No history for[/] {mondo_id}")
+        console.print(f"[yellow]No history for[/] {term_id}")
         return
     total_events = len(changes)
     if since_seq is not None:
@@ -230,7 +271,7 @@ def _render_timeline(
         keep = set(seqs[-limit:])
         changes = [c for c in changes if c.commit_seq in keep]
 
-    _render_header(mondo_id, header, changes, total_events, limit, since_seq)
+    _render_header(term_id, header, changes, total_events, limit, since_seq)
 
     cap = None if full else render.DEFAULT_TRUNCATE
     for _, group in groupby(changes, key=lambda c: c.commit_seq):
@@ -253,7 +294,7 @@ def _render_timeline(
 
 
 def _render_header(
-    mondo_id: str,
+    term_id: str,
     header: TermHeader | None,
     changes: list[Change],
     total_events: int,
@@ -262,7 +303,7 @@ def _render_header(
 ) -> None:
     """Print the orientation header: name, span, and predicate counts."""
     title = Text()
-    title.append(mondo_id, style="bold cyan")
+    title.append(term_id, style="bold cyan")
     if header is not None and header.current_name:
         title.append(f" — {header.current_name}", style="bold")
     console.print(title)
@@ -320,14 +361,14 @@ def _render_commit_view(
     console.print(header_line)
     if head.pr_number is not None:
         _print_pr_link(head.pr_number)
-    n_terms = len({tc.mondo_id for tc in events})
+    n_terms = len({tc.term_id for tc in events})
     console.print(Text(f"{n_terms} terms changed", style="dim"))
 
     cap = None if full else render.DEFAULT_TRUNCATE
-    for mondo_id, group in groupby(events, key=lambda tc: tc.mondo_id):
+    for term_id, group in groupby(events, key=lambda tc: tc.term_id):
         rows = list(group)
         title = Text("\n")
-        title.append(mondo_id, style="bold cyan")
+        title.append(term_id, style="bold cyan")
         if rows[0].name:
             title.append(f" — {rows[0].name}", style="bold")
         console.print(title)
@@ -340,7 +381,7 @@ def _render_diff_view(
     ref_a: str, ref_b: str, events: list[TermChange], full: bool = False
 ) -> None:
     """Structural view of a range diff: per-term sections, per-commit sub-groups."""
-    n_terms = len({tc.mondo_id for tc in events})
+    n_terms = len({tc.term_id for tc in events})
     n_commits = len({tc.change.commit_seq for tc in events})
     summary = Text()
     summary.append(f"{len(events)}", style="bold")
@@ -350,12 +391,91 @@ def _render_diff_view(
     summary.append(f"{n_commits}", style="bold")
     summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
     console.print(summary)
+    _render_events_by_term_and_commit(events, full=full)
 
+
+def _render_search_view(
+    query: str,
+    events: list[TermChange],
+    regex: bool = False,
+    ignore_case: bool = False,
+    full: bool = False,
+) -> None:
+    """Structural view of search hits: same layout as the diff view.
+
+    Before rendering, apply a clause-aware post-filter: for any paired
+    ``Edit`` whose delta (body-diff, comment-diff, or qualifier symmetric
+    difference) doesn't actually contain the query, drop both constituent
+    events. Unpaired adds/removes are always kept — their whole clause is
+    "the change" by definition, so the SQL match already tells us the query
+    is in the changed portion.
+
+    See :func:`mondo_history.render.edit_delta_matches` for the exact rule.
+    """
+    events = _filter_events_by_delta_match(events, query, regex, ignore_case)
+    if not events:
+        console.print(f'[yellow]No events matching[/] "{query}"')
+        return
+    n_terms = len({tc.term_id for tc in events})
+    n_commits = len({tc.change.commit_seq for tc in events})
+    summary = Text()
+    summary.append(f"Found {len(events)}", style="bold")
+    summary.append(" events matching ", style="dim")
+    summary.append(f'"{query}"', style="bold")
+    summary.append(" across ", style="dim")
+    summary.append(f"{n_terms}", style="bold")
+    summary.append(" terms and ", style="dim")
+    summary.append(f"{n_commits}", style="bold")
+    summary.append(" commits", style="dim")
+    console.print(summary)
+    _render_events_by_term_and_commit(events, full=full)
+
+
+def _filter_events_by_delta_match(
+    events: list[TermChange], query: str, regex: bool, ignore_case: bool
+) -> list[TermChange]:
+    """Drop paired-edit event pairs whose delta doesn't contain the query.
+
+    Pairs events per commit, drops both halves of any ``Edit`` whose
+    :func:`~mondo_history.render.edit_delta_matches` returns False, and
+    keeps every unpaired ``Add`` / ``Remove`` as-is. Preserves the input
+    order at the (term_id, commit_seq) granularity so the downstream
+    ``groupby`` in :func:`_render_events_by_term_and_commit` still sees
+    contiguous groupings.
+    """
+    surviving: list[TermChange] = []
+    for _, group in groupby(
+        events, key=lambda tc: (tc.term_id, tc.change.commit_seq)
+    ):
+        group_events = list(group)
+        by_change_id = {id(tc.change): tc for tc in group_events}
+        changes = [tc.change for tc in group_events]
+        for op in render.pair_events(changes):
+            if isinstance(op, render.Edit):
+                if render.edit_delta_matches(op, query, regex, ignore_case):
+                    surviving.append(by_change_id[id(op.before)])
+                    surviving.append(by_change_id[id(op.after)])
+            elif isinstance(op, render.Add):
+                surviving.append(by_change_id[id(op.change)])
+            else:  # Remove
+                surviving.append(by_change_id[id(op.change)])
+    return surviving
+
+
+def _render_events_by_term_and_commit(
+    events: list[TermChange], full: bool = False
+) -> None:
+    """Group ``events`` by term, then by commit within each term, and render.
+
+    Shared between ``diff`` and ``search``. Expects ``events`` already
+    ordered by ``(term_id, commit_seq, ...)`` so the groupings are
+    contiguous.
+    """
     cap = None if full else render.DEFAULT_TRUNCATE
-    for mondo_id, term_group in groupby(events, key=lambda tc: tc.mondo_id):
+    for term_id, term_group in groupby(events, key=lambda tc: tc.term_id):
         term_rows = list(term_group)
         title = Text("\n")
-        title.append(mondo_id, style="bold cyan")
+        title.append(term_id, style="bold cyan")
         # Take the most recent name we saw in the range as the section header.
         latest_name = next(
             (tc.name for tc in reversed(term_rows) if tc.name is not None), None
@@ -380,12 +500,12 @@ def _render_diff_view(
                 console.print(render.render_op(op, truncate=cap))
 
 
-def _render_state(mondo_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
+def _render_state(term_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
     if not clauses:
-        console.print(f"[yellow]{mondo_id} has no snapshot at or before {at}[/]")
+        console.print(f"[yellow]{term_id} has no snapshot at or before {at}[/]")
         return
-    console.print(f"[bold cyan]{mondo_id}[/] as of {at}:")
-    console.print(Text(f"  id: {mondo_id}"))
+    console.print(f"[bold cyan]{term_id}[/] as of {at}:")
+    console.print(Text(f"  id: {term_id}"))
     for predicate, value in clauses:
         console.print(Text(f"  {predicate}: {value}"))
 

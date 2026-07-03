@@ -51,6 +51,16 @@ uv run mondo-history commit 1ac4db2
 uv run mondo-history releases
 uv run mondo-history pr 10400
 uv run mondo-history diff v2026-06-02 HEAD --term MONDO:0001213
+
+# Search event values for a substring (git log -S style): commits that
+# added or removed a clause where the query appears in the changed
+# portion — a paired edit whose only "hit" is in a kept qualifier
+# doesn't count.
+uv run mondo-history search "OMIM:609814"
+uv run mondo-history search "GARD:18551" --predicate xref
+uv run mondo-history search "\bCML\b" --regex           # word-boundary regex
+uv run mondo-history search "CML" --namespace MONDO     # scope to MONDO: term IDs
+uv run mondo-history search "MONDO:MalaCards" --term MONDO:0012350
 ```
 
 ## Development

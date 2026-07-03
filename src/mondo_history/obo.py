@@ -36,7 +36,7 @@ class Clause:
 class TermState:
     """A term's normalized content at one point in history."""
 
-    mondo_id: str
+    term_id: str
     clauses: tuple[Clause, ...]  # sorted, canonical
     content_hash: str
 
@@ -80,7 +80,7 @@ def clause_delta(
 def split_document(data: bytes) -> tuple[bytes, dict[str, bytes]]:
     """Split an OBO document into a reusable parse context and per-term stanzas.
 
-    Returns ``(context, {mondo_id: stanza_bytes})`` where ``context`` is the header
+    Returns ``(context, {term_id: stanza_bytes})`` where ``context`` is the header
     plus every non-``[Term]`` stanza (typedefs, instances) — everything needed to
     parse any single term stanza in isolation. This is a cheap byte-level scan, no
     fastobo, so it lets the extractor find which terms changed without parsing the
@@ -95,9 +95,9 @@ def split_document(data: bytes) -> tuple[bytes, dict[str, bytes]]:
         end = matches[i + 1].start() if i + 1 < len(matches) else len(data)
         stanza = data[match.start() : end]
         if match.group().strip() == b"[Term]":
-            mondo_id = _stanza_id(stanza)
-            if mondo_id is not None:
-                terms[mondo_id] = stanza
+            term_id = _stanza_id(stanza)
+            if term_id is not None:
+                terms[term_id] = stanza
                 continue
         context.append(stanza)
     return b"".join(context), terms
@@ -157,14 +157,14 @@ def _parse_batch(
         return
     wanted = set(ids)
     for frame in frames:
-        mondo_id = str(frame.id)
-        if mondo_id in wanted:
+        term_id = str(frame.id)
+        if term_id in wanted:
             clauses = clauses_of(frame)
-            parsed[mondo_id] = TermState(mondo_id, clauses, hash_clauses(clauses))
+            parsed[term_id] = TermState(term_id, clauses, hash_clauses(clauses))
 
 
 def parse_terms(data: bytes, threads: int = 1) -> dict[str, TermState]:
-    """Parse one OBO document into ``{mondo_id: TermState}`` for its term frames.
+    """Parse one OBO document into ``{term_id: TermState}`` for its term frames.
 
     Non-term frames (typedefs, instances) and the header are ignored — the index
     is about ontology terms.
@@ -178,7 +178,7 @@ def parse_terms(data: bytes, threads: int = 1) -> dict[str, TermState]:
     result: dict[str, TermState] = {}
     for frame in doc:
         if isinstance(frame, fastobo.term.TermFrame):
-            mondo_id = str(frame.id)
+            term_id = str(frame.id)
             clauses = clauses_of(frame)
-            result[mondo_id] = TermState(mondo_id, clauses, hash_clauses(clauses))
+            result[term_id] = TermState(term_id, clauses, hash_clauses(clauses))
     return result
