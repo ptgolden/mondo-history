@@ -206,7 +206,19 @@ class GitSource:
     # -- internals -------------------------------------------------------
 
     def _read_commits(self, path: str) -> list["_RawCommit"]:
-        """Ordered commit metadata for every commit touching ``path``.
+        """Ordered commit metadata for every mainline commit touching ``path``.
+
+        Uses ``--first-parent`` so the sequence is genuinely linear: each
+        commit's predecessor in the returned list is its git first-parent, and
+        the diff between adjacent commits is what a curator saw land on main.
+
+        Without ``--first-parent``, ``git log --follow`` returns every commit
+        touching the file across every branch, interleaved chronologically.
+        Diffing adjacent commits then compares state on unrelated branches
+        (their common ancestor may be many commits back), producing phantom
+        "changes" that don't reflect any real edit. That was the source of the
+        weird edit cycles on paired events: the walk zig-zagged between
+        branch state and mainline state, and each hop looked like a change.
 
         The body (``%B``) is the last field and no path/diff output follows it,
         so multi-line messages parse unambiguously against the separators.
@@ -220,6 +232,7 @@ class GitSource:
                 "git",
                 "log",
                 "--follow",
+                "--first-parent",
                 f"--format={fmt}",
                 "--",
                 path,
@@ -253,12 +266,15 @@ class GitSource:
         path. The path is still captured for reporting.
         """
         # Newest-first (see _read_commits); order is irrelevant here since the
-        # result is keyed by sha.
+        # result is keyed by sha. `--first-parent` matches _read_commits so we
+        # don't accidentally return blobs for commits that _read_commits
+        # (correctly) omitted.
         out = _run(
             [
                 "git",
                 "log",
                 "--follow",
+                "--first-parent",
                 "--raw",
                 "--no-abbrev",
                 f"--format={_RECORD}%H",
