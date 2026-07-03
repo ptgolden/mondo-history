@@ -1,16 +1,22 @@
-# Mondo History Index
+# obohist — Original Vision
 
-*A queryable history of ontology evolution.*
+*A queryable history of OBO ontology evolution.*
 
 > **Status:** partially implemented. This document has been updated to reflect
 > decisions made during prototyping. See `DESIGN.md` for the concrete Parquet
 > schema and `README.md` to run the CLI.
+>
+> This document was originally written for Mondo specifically; the tool has
+> since been generalized to work with any OBO Foundry-style ontology whose
+> source is in a git repository. Where "Mondo" appears below, treat it as an
+> illustrative example — the same reasoning holds for GO, HP, ChEBI, PATO,
+> and any other similarly maintained OBO ontology.
 
 ## Overview
 
-Git is the authoritative source of Mondo's history, but in practice that history is not available during normal development.
+Git is the authoritative source of an OBO ontology's history, but in practice that history is not available during normal development.
 
-The Mondo repository has grown to the point where maintaining a complete clone with full history is impractical. Development is therefore performed using shallow clones (for example, `--depth 1`), which intentionally omit historical commits.
+Large OBO repositories grow to the point where maintaining a complete clone with full history is impractical. Development is therefore performed using shallow clones (for example, `--depth 1`), which intentionally omit historical commits.
 
 As a result, historical investigation becomes awkward. Questions such as
 
@@ -25,9 +31,9 @@ Instead, developers must resort to the GitHub web interface, manually search com
 
 This is particularly unfortunate because many ontology debugging and maintenance tasks are fundamentally historical. Understanding the current state of the ontology frequently requires understanding how that state was reached.
 
-The Mondo History Index addresses this by treating complete Git history as a build-time dependency rather than a user dependency.
+`obohist` addresses this by treating complete Git history as a build-time dependency rather than a user dependency.
 
-A history extraction process runs once against a complete repository clone and produces a compact, queryable artifact describing the evolution of `mondo-edit.obo`. Developers query this artifact directly rather than traversing repository history.
+A history extraction process runs once per source, against a complete repository clone, and produces a compact, queryable database describing the evolution of one OBO file (e.g. `mondo-edit.obo`, `go-edit.obo`, `pato-edit.obo`). Developers query these databases directly rather than traversing repository history.
 
 The result is that historical investigation becomes a routine part of ontology development instead of an exceptional task requiring web searches, bespoke scripts, or access to a complete repository clone.
 
@@ -35,13 +41,13 @@ The result is that historical investigation becomes a routine part of ontology d
 
 # Goals
 
-The project aims to provide a historical view of Mondo that is:
+The project aims to provide a historical view of a version-controlled OBO ontology that is:
 
 * organized around ontology concepts rather than Git commits
 * fast to query
 * reproducible
 * distributable as a generated artifact
-* usable without cloning the Mondo repository
+* usable without cloning the source ontology's repository
 * suitable for both local and hosted use
 
 The emphasis is on supporting day-to-day ontology development, debugging, review, and maintenance.
@@ -61,7 +67,7 @@ Rather than asking "Which commit changed this file?", users should be able to as
 
 # Non-Goals
 
-The Mondo History Index is **not** intended to:
+`obohist` is **not** intended to:
 
 * replace Git
 * replace repository history
@@ -96,22 +102,22 @@ The generated artifact should contain sufficient historical information to answe
 
 Historical queries should produce deterministic answers based on a specific version of the generated artifact.
 
-The artifact itself should be versioned alongside Mondo releases (or another well-defined build cadence) so that historical results are reproducible.
+Each source's database should be versioned alongside the underlying ontology's release cadence (or another well-defined cadence) so that historical results are reproducible.
 
 ---
 
 # Conceptual Architecture
 
-The system has three logical components.
+The system has three logical components, per configured source.
 
 ```text
-                Mondo Repository
+              Source Repository
                         │
                         │
               History Extraction
                         │
                         ▼
-         Generated History Artifact
+         Generated History Database
                         │
         ┌───────────────┴───────────────┐
         │                               │
@@ -119,13 +125,14 @@ The system has three logical components.
     Local CLI                  Hosted Query Service
 ```
 
-Only the extraction process needs Git access — and even then not a full clone of
-the whole repository. It builds a **blob-filtered clone**
+Only the extraction process needs Git access — and even then not a full clone
+of the whole repository. It builds a **blob-filtered clone**
 (`git clone --filter=blob:none`: commit graph and trees, no file contents) and
-then fetches only the historical contents of the single edited file via a
-**scoped, delta-packed** `git backfill --sparse` (with the sparse-checkout set to
-just `mondo-edit.obo`). So extraction downloads the history of one file and
-nothing else, in a handful of batched requests rather than one fetch per version.
+then fetches only the historical contents of the single edited OBO file (as
+declared per source in `obohist.toml`) via a **scoped, delta-packed**
+`git backfill --sparse` (with the sparse-checkout set to just that file). So
+extraction downloads the history of one file and nothing else, in a handful
+of batched requests rather than one fetch per version.
 
 All user-facing tools operate against the generated history artifact, never Git.
 
@@ -238,8 +245,8 @@ require reprocessing history — only the new commits.
   full rebuild.
 
 The steady state is therefore one expensive full build, then perpetual cheap
-appends — a Mondo release adds a handful of commits, seconds of work, and a few
-kilobytes of new part-files.
+appends — a typical OBO release adds a handful of commits, seconds of work,
+and a few kilobytes of new part-files.
 
 ---
 
@@ -279,11 +286,13 @@ The web application should expose the same information available through the dow
 
 # Future Directions
 
-Although initially focused on `mondo-edit.obo`, the overall design should not be inherently Mondo-specific.
+`obohist` is now source-agnostic in its architecture: `obohist.toml` declares any number of OBO sources, each with its own repo + file. Any version-controlled `.obo` file works today.
 
-The same architecture could be applied to other version-controlled OBO ontologies or ontology-derived artifacts.
+Longer term:
 
-Longer term, the project could provide a general mechanism for exploring ontology evolution independently of any particular repository.
+* **Other OBO serializations** — OWL Functional Notation, RDF/XML, Turtle, JSON-LD. The current diff-scoped extraction depends on OBO's line-oriented `[Term]` stanzas; other formats would need format-specific stanza-equivalent parsers. See DESIGN.md's next-steps for details.
+* **Prefix migrations across renames** — for ontologies that changed CURIE prefix at some point (e.g. Mondo's `TBD:X` → `MONDO:X` in 2017), declare the mapping in the source's config so `obohist term MONDO:0000450` transparently includes the pre-rename history. Design in `2026-07-03-note.term-identity-across-renames.md`.
+* **Incremental artifact updates** — top of the queue. Right now `source sync` re-clones and rebuilds fully; the plan is to append new part-files instead.
 
 ---
 
@@ -318,9 +327,9 @@ workflows rather than implementation convenience.
 
 # Vision
 
-The Mondo History Index aims to make ontology history as easy to explore as the ontology itself.
+`obohist` aims to make an OBO ontology's history as easy to explore as the ontology itself.
 
 Instead of manually traversing commits, GitHub history, and pull requests, developers should be able to ask historical questions directly and receive answers in terms of ontology concepts.
 
-The project is fundamentally about improving the observability of ontology evolution. By transforming repository history into a compact, queryable artifact, it enables historical investigation to become a routine part of ontology development rather than a specialized form of repository archaeology.
+The project is fundamentally about improving the observability of ontology evolution. By transforming repository history into a compact, queryable database, it enables historical investigation to become a routine part of ontology development rather than a specialized form of repository archaeology.
 

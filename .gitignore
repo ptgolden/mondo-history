@@ -15,3 +15,6 @@ NOTES.md
 
 # Editor / OS
 .DS_Store
+*.swp
+*.swo
+*~
