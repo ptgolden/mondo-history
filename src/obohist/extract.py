@@ -78,24 +78,25 @@ def build(
         seqs.append(version.commit.seq)
         seq_dates.append((version.commit.seq, row["committed_date"]))
 
-        if i == 0:
-            for term in current.values():
-                snapshots.append(_snapshot_row(version, term))
-        else:
-            for term_id, term in current.items():
-                before = prev.get(term_id)
-                if before is not None and before.content_hash == term.content_hash:
-                    continue
-                snapshots.append(_snapshot_row(version, term))
-                added, removed = clause_delta(
-                    before.clauses if before else _EMPTY, term.clauses
-                )
-                events.extend(_event_rows(version, term_id, added, model.Operation.ADD))
-                events.extend(_event_rows(version, term_id, removed, model.Operation.REMOVE))
-            for term_id in prev.keys() - current.keys():
-                events.extend(
-                    _event_rows(version, term_id, prev[term_id].clauses, model.Operation.REMOVE)
-                )
+        # At the first commit `prev` is empty, so every term's `before` is
+        # None and the delta falls out as "all clauses added". That's the
+        # right story — a term's creation is a change from ∅ to its full
+        # clause set, and we want that visible in the events table so the
+        # timeline is complete.
+        for term_id, term in current.items():
+            before = prev.get(term_id)
+            if before is not None and before.content_hash == term.content_hash:
+                continue
+            snapshots.append(_snapshot_row(version, term))
+            added, removed = clause_delta(
+                before.clauses if before else _EMPTY, term.clauses
+            )
+            events.extend(_event_rows(version, term_id, added, model.Operation.ADD))
+            events.extend(_event_rows(version, term_id, removed, model.Operation.REMOVE))
+        for term_id in prev.keys() - current.keys():
+            events.extend(
+                _event_rows(version, term_id, prev[term_id].clauses, model.Operation.REMOVE)
+            )
         prev = current
 
     meta = [
@@ -395,63 +396,54 @@ def _build_chunk(
         context, stanzas = split_document(blob)
         cur_hash = {mid: stanza_hash(s) for mid, s in stanzas.items()}
 
-        if i == 0:  # global baseline: snapshot every term, emit no events
-            parsed, failed = parse_stanzas(context, stanzas)
-            _record_skips(skipped, version, failed)
-            for term_id in failed:
-                raw[term_id] = cur_hash[term_id]  # don't retry identical bad bytes
-            for term_id, term in parsed.items():
-                digest = cur_hash.get(term_id)
-                if digest is None:
-                    continue  # fastobo id differs from our stanza key; can't track
-                snap_rows.append(_snapshot_row(version, term))
-                n_snap += 1
-                state[term_id] = term
-                raw[term_id] = digest
-        else:
-            changed = [mid for mid in stanzas if cur_hash[mid] != raw.get(mid)]
-            removed = raw.keys() - stanzas.keys()
-            parsed, failed = parse_stanzas(context, {mid: stanzas[mid] for mid in changed})
-            failed_set = set(failed)
-            _record_skips(skipped, version, failed)
-            for term_id in failed:
-                # Mark the failing bytes as seen: keep the last good state and only
-                # re-attempt if this stanza's content changes again (avoids
-                # re-bisecting the same unparseable term at every later commit).
-                raw[term_id] = cur_hash[term_id]
-            for term_id in changed:
-                if term_id in failed_set:
-                    continue
-                term = parsed.get(term_id)
-                if term is None:
-                    # Stanza parsed, but fastobo keyed it under a different id than
-                    # our text-level scan did; record and skip rather than crash.
-                    skipped.append(
-                        {"commit_seq": version.commit.seq, "sha": version.commit.sha,
-                         "term_id": term_id, "error": "IdMismatch"}
-                    )
-                    raw[term_id] = cur_hash[term_id]
-                    continue
-                before = state.get(term_id)
-                raw[term_id] = cur_hash[term_id]
-                if before is not None and before.content_hash == term.content_hash:
-                    continue  # bytes changed but canonical content did not
-                snap_rows.append(_snapshot_row(version, term))
-                n_snap += 1
-                added, gone = clause_delta(before.clauses if before else _EMPTY, term.clauses)
-                event_rows.extend(_event_rows(version, term_id, added, model.Operation.ADD))
-                event_rows.extend(_event_rows(version, term_id, gone, model.Operation.REMOVE))
-                n_evt += len(added) + len(gone)
-                state[term_id] = term
-            for term_id in removed:
-                del raw[term_id]
-                term = state.pop(term_id, None)
-                if term is None:
-                    continue  # only ever failed to parse; nothing was emitted to remove
-                event_rows.extend(
-                    _event_rows(version, term_id, term.clauses, model.Operation.REMOVE)
+        # At the chunk-0 first commit `state` and `raw` are empty (the seed
+        # returns empty when start == 0), so `changed` covers every term and
+        # `before` falls out as None → every clause becomes an add event.
+        # That's the right story: a term's creation is a change from ∅ to
+        # its full clause set, and we want it visible in the events table.
+        changed = [mid for mid in stanzas if cur_hash[mid] != raw.get(mid)]
+        removed = raw.keys() - stanzas.keys()
+        parsed, failed = parse_stanzas(context, {mid: stanzas[mid] for mid in changed})
+        failed_set = set(failed)
+        _record_skips(skipped, version, failed)
+        for term_id in failed:
+            # Mark the failing bytes as seen: keep the last good state and only
+            # re-attempt if this stanza's content changes again (avoids
+            # re-bisecting the same unparseable term at every later commit).
+            raw[term_id] = cur_hash[term_id]
+        for term_id in changed:
+            if term_id in failed_set:
+                continue
+            term = parsed.get(term_id)
+            if term is None:
+                # Stanza parsed, but fastobo keyed it under a different id than
+                # our text-level scan did; record and skip rather than crash.
+                skipped.append(
+                    {"commit_seq": version.commit.seq, "sha": version.commit.sha,
+                     "term_id": term_id, "error": "IdMismatch"}
                 )
-                n_evt += len(term.clauses)
+                raw[term_id] = cur_hash[term_id]
+                continue
+            before = state.get(term_id)
+            raw[term_id] = cur_hash[term_id]
+            if before is not None and before.content_hash == term.content_hash:
+                continue  # bytes changed but canonical content did not
+            snap_rows.append(_snapshot_row(version, term))
+            n_snap += 1
+            added, gone = clause_delta(before.clauses if before else _EMPTY, term.clauses)
+            event_rows.extend(_event_rows(version, term_id, added, model.Operation.ADD))
+            event_rows.extend(_event_rows(version, term_id, gone, model.Operation.REMOVE))
+            n_evt += len(added) + len(gone)
+            state[term_id] = term
+        for term_id in removed:
+            del raw[term_id]
+            term = state.pop(term_id, None)
+            if term is None:
+                continue  # only ever failed to parse; nothing was emitted to remove
+            event_rows.extend(
+                _event_rows(version, term_id, term.clauses, model.Operation.REMOVE)
+            )
+            n_evt += len(term.clauses)
 
         since_flush += 1
         if since_flush >= _FLUSH_EVERY:

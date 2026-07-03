@@ -98,11 +98,11 @@ def test_term_events_are_clause_deltas(artifact: Path):
     kinds = [(c.operation, c.predicate) for c in db.term_timeline("MONDO:0000001")]
     db.close()
 
-    # synonym added at c1, xref added at c3.
+    # name added at c0 (birth of the term — ∅ → full clause set is a valid
+    # diff), synonym added at c1, xref added at c3.
+    assert ("add", "name") in kinds
     assert ("add", "synonym") in kinds
     assert ("add", "xref") in kinds
-    # The baseline 'name: disease' predates the window, so it is NOT an event.
-    assert ("add", "name") not in kinds
 
 
 def test_pure_rename_emits_no_events(artifact: Path):
