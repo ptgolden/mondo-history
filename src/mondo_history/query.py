@@ -41,7 +41,7 @@ class TermChange:
     has no name (e.g. term-removal events).
     """
 
-    mondo_id: str
+    term_id: str
     name: str | None
     change: Change
 
@@ -50,7 +50,7 @@ class TermChange:
 class TermHeader:
     """Summary stats for a term, used to orient the timeline view."""
 
-    mondo_id: str
+    term_id: str
     current_name: str | None
     event_count: int
     first_sha: str
@@ -91,10 +91,10 @@ class HistoryDB:
         single = self.dir / f"{name}.parquet"
         return str(single) if single.exists() else None
 
-    def term_timeline(self, mondo_id: str, predicate: str | None = None) -> list[Change]:
+    def term_timeline(self, term_id: str, predicate: str | None = None) -> list[Change]:
         """All changes to a term, oldest first, optionally one clause kind only."""
-        where = "e.mondo_id = ?"
-        params: list[object] = [mondo_id]
+        where = "e.term_id = ?"
+        params: list[object] = [term_id]
         if predicate is not None:
             where += " AND e.predicate = ?"
             params.append(predicate)
@@ -112,14 +112,14 @@ class HistoryDB:
         ).fetchall()
         return [Change(*row) for row in rows]
 
-    def term_header(self, mondo_id: str) -> TermHeader | None:
+    def term_header(self, term_id: str) -> TermHeader | None:
         """Orientation stats for the term, or ``None`` if it has no events."""
         stats = self.con.execute(
             """
             SELECT min(commit_seq), max(commit_seq), count(*)
-            FROM events WHERE mondo_id = ?
+            FROM events WHERE term_id = ?
             """,
-            [mondo_id],
+            [term_id],
         ).fetchone()
         if stats is None or stats[0] is None:
             return None
@@ -135,13 +135,13 @@ class HistoryDB:
         name_row = self.con.execute(
             """
             SELECT name FROM term_snapshots
-            WHERE mondo_id = ? AND name IS NOT NULL
+            WHERE term_id = ? AND name IS NOT NULL
             ORDER BY commit_seq DESC LIMIT 1
             """,
-            [mondo_id],
+            [term_id],
         ).fetchone()
         return TermHeader(
-            mondo_id=mondo_id,
+            term_id=term_id,
             current_name=name_row[0] if name_row else None,
             event_count=event_count,
             first_sha=first_sha,
@@ -151,15 +151,15 @@ class HistoryDB:
             last_pr=last_pr,
         )
 
-    def term_at(self, mondo_id: str, commit_seq: int) -> list[tuple[str, str]]:
+    def term_at(self, term_id: str, commit_seq: int) -> list[tuple[str, str]]:
         """Reconstruct a term's clauses as of ``commit_seq`` (latest snapshot <=)."""
         row = self.con.execute(
             """
             SELECT clauses FROM term_snapshots
-            WHERE mondo_id = ? AND commit_seq <= ?
+            WHERE term_id = ? AND commit_seq <= ?
             ORDER BY commit_seq DESC LIMIT 1
             """,
-            [mondo_id, commit_seq],
+            [term_id, commit_seq],
         ).fetchone()
         if row is None:
             return []
@@ -173,8 +173,8 @@ class HistoryDB:
         Returns ``(head, events)``. ``head`` is a ``Change`` whose commit-level
         fields describe the matched commit (its operation/predicate/value are
         empty placeholders — the CLI uses it purely for the ``sha/date/PR/message``
-        header). ``events`` is ordered by ``(mondo_id, operation, predicate, value)``
-        so ``groupby(events, key=mondo_id)`` gives per-term event lists directly
+        header). ``events`` is ordered by ``(term_id, operation, predicate, value)``
+        so ``groupby(events, key=term_id)`` gives per-term event lists directly
         consumable by :func:`mondo_history.render.pair_events`.
 
         Returns ``(None, [])`` when no commit matches the sha prefix.
@@ -191,24 +191,24 @@ class HistoryDB:
 
         rows = self.con.execute(
             """
-            SELECT e.mondo_id, s.name, e.operation, e.predicate, e.value
+            SELECT e.term_id, s.name, e.operation, e.predicate, e.value
             FROM events e
             LEFT JOIN term_snapshots s
-              ON s.mondo_id = e.mondo_id AND s.commit_seq = e.commit_seq
+              ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
             WHERE e.commit_seq = ?
-            ORDER BY e.mondo_id, e.operation, e.predicate, e.value
+            ORDER BY e.term_id, e.operation, e.predicate, e.value
             """,
             [commit_seq],
         ).fetchall()
         events = [
             TermChange(
-                mondo_id=mondo_id,
+                term_id=term_id,
                 name=name,
                 change=Change(
                     commit_seq, date, sha, author, pr, message, op, pred, val
                 ),
             )
-            for mondo_id, name, op, pred, val in rows
+            for term_id, name, op, pred, val in rows
         ]
         return head, events
 
@@ -216,13 +216,13 @@ class HistoryDB:
         """Terms changed by any commit belonging to a pull request."""
         return self.con.execute(
             """
-            SELECT DISTINCT e.mondo_id, s.name
+            SELECT DISTINCT e.term_id, s.name
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
-              ON s.mondo_id = e.mondo_id AND s.commit_seq = e.commit_seq
+              ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
             WHERE c.pr_number = ?
-            ORDER BY e.mondo_id
+            ORDER BY e.term_id
             """,
             [pr_number],
         ).fetchall()
@@ -247,53 +247,53 @@ class HistoryDB:
         return row[0]
 
     def range_events(
-        self, ref_a: str, ref_b: str, mondo_id: str | None = None
+        self, ref_a: str, ref_b: str, term_id: str | None = None
     ) -> list[TermChange]:
         """Events in ``(lo, hi]``, one row per clause change.
 
         ``lo``/``hi`` are the two refs (any of tag, short sha, HEAD, or
         commit_seq — via :meth:`resolve_ref`), sorted so order doesn't matter.
         Optionally restricted to one term. Rows are ordered by
-        ``(mondo_id, commit_seq, operation, predicate, value)`` so grouping
+        ``(term_id, commit_seq, operation, predicate, value)`` so grouping
         by term (then by commit within term) feeds directly into the render
         pipeline.
         """
         lo, hi = sorted((self.resolve_ref(ref_a), self.resolve_ref(ref_b)))
         where = "e.commit_seq > ? AND e.commit_seq <= ?"
         params: list[object] = [lo, hi]
-        if mondo_id is not None:
-            where += " AND e.mondo_id = ?"
-            params.append(mondo_id)
+        if term_id is not None:
+            where += " AND e.term_id = ?"
+            params.append(term_id)
         rows = self.con.execute(
             f"""
-            SELECT e.mondo_id, s.name,
+            SELECT e.term_id, s.name,
                    c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
-              ON s.mondo_id = e.mondo_id AND s.commit_seq = e.commit_seq
+              ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
             WHERE {where}
-            ORDER BY e.mondo_id, c.commit_seq, e.operation, e.predicate, e.value
+            ORDER BY e.term_id, c.commit_seq, e.operation, e.predicate, e.value
             """,
             params,
         ).fetchall()
         return [
             TermChange(
-                mondo_id=mondo_id,
+                term_id=term_id,
                 name=name,
                 change=Change(
                     seq, date, sha, author, pr, message, op, pred, val
                 ),
             )
-            for mondo_id, name, seq, date, sha, author, pr, message, op, pred, val in rows
+            for term_id, name, seq, date, sha, author, pr, message, op, pred, val in rows
         ]
 
     def search_events(
         self,
         query: str,
-        mondo_id: str | None = None,
+        term_id: str | None = None,
         predicate: str | None = None,
         since_seq: int | None = None,
         regex: bool = False,
@@ -314,13 +314,13 @@ class HistoryDB:
         * ``ignore_case=True``: applies to both modes — via ``LOWER()`` on
           both sides for substring, via the ``'i'`` option flag for regex.
 
-        Optional narrowings (all AND'd together): ``mondo_id`` restricts to
+        Optional narrowings (all AND'd together): ``term_id`` restricts to
         one term, ``predicate`` restricts to one clause kind (``xref``,
         ``is_a``, ...), ``since_seq`` cuts off commits older than the
         supplied ``commit_seq`` (resolve external refs via
         :meth:`resolve_ref` in the caller).
 
-        Rows come back ordered ``(mondo_id, commit_seq, operation,
+        Rows come back ordered ``(term_id, commit_seq, operation,
         predicate, value)`` so grouping-by-term-then-commit feeds the
         render pipeline directly.
         """
@@ -335,9 +335,9 @@ class HistoryDB:
             else:
                 where = "contains(e.value, ?)"
         params: list[object] = [query]
-        if mondo_id is not None:
-            where += " AND e.mondo_id = ?"
-            params.append(mondo_id)
+        if term_id is not None:
+            where += " AND e.term_id = ?"
+            params.append(term_id)
         if predicate is not None:
             where += " AND e.predicate = ?"
             params.append(predicate)
@@ -346,28 +346,28 @@ class HistoryDB:
             params.append(since_seq)
         rows = self.con.execute(
             f"""
-            SELECT e.mondo_id, s.name,
+            SELECT e.term_id, s.name,
                    c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
-              ON s.mondo_id = e.mondo_id AND s.commit_seq = e.commit_seq
+              ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
             WHERE {where}
-            ORDER BY e.mondo_id, c.commit_seq, e.operation, e.predicate, e.value
+            ORDER BY e.term_id, c.commit_seq, e.operation, e.predicate, e.value
             """,
             params,
         ).fetchall()
         return [
             TermChange(
-                mondo_id=mondo_id,
+                term_id=term_id,
                 name=name,
                 change=Change(
                     seq, date, sha, author, pr, message, op, pred, val
                 ),
             )
-            for mondo_id, name, seq, date, sha, author, pr, message, op, pred, val in rows
+            for term_id, name, seq, date, sha, author, pr, message, op, pred, val in rows
         ]
 
     def releases(self) -> list[tuple[str, int, object]]:

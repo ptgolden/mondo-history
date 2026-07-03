@@ -105,7 +105,7 @@ def _ensure_clone(url: str, since: Optional[str], clone_dir: Path, repo: Optiona
 
 @app.command()
 def term(
-    mondo_id: str = typer.Argument(..., help="e.g. MONDO:0007739"),
+    term_id: str = typer.Argument(..., help="e.g. MONDO:0007739"),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
     only: Optional[str] = typer.Option(None, help="Restrict to one clause kind, e.g. synonym."),
     at: Optional[str] = typer.Option(
@@ -123,13 +123,13 @@ def term(
     db = _open(artifact)
     if at is not None:
         at_seq = db.resolve_ref(at)
-        _render_state(mondo_id, at, db.term_at(mondo_id, at_seq))
+        _render_state(term_id, at, db.term_at(term_id, at_seq))
     else:
-        header = db.term_header(mondo_id)
-        changes = db.term_timeline(mondo_id, predicate=only)
+        header = db.term_header(term_id)
+        changes = db.term_timeline(term_id, predicate=only)
         since_seq = db.resolve_ref(since) if since is not None else None
         _render_timeline(
-            mondo_id, header, changes,
+            term_id, header, changes,
             limit=limit, since_seq=since_seq, full=full,
         )
     db.close()
@@ -164,9 +164,9 @@ def pr(
         console.print(f"[yellow]No indexed changes for PR[/] #{number}")
     else:
         console.print(f"[bold]{len(terms)}[/] terms changed in PR #{number}:")
-        for mondo_id, name in terms:
+        for term_id, name in terms:
             line = Text("  ")
-            line.append(mondo_id, style="cyan")
+            line.append(term_id, style="cyan")
             if name:
                 line.append(f"  {name}", style="dim")
             console.print(line)
@@ -183,7 +183,7 @@ def diff(
 ):
     """Show clause changes between two points, grouped by term and commit."""
     db = _open(artifact)
-    events = db.range_events(ref_a, ref_b, mondo_id=term)
+    events = db.range_events(ref_a, ref_b, term_id=term)
     if not events:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
@@ -213,7 +213,7 @@ def search(
     db = _open(artifact)
     since_seq = db.resolve_ref(since) if since is not None else None
     events = db.search_events(
-        query, mondo_id=term, predicate=predicate, since_seq=since_seq,
+        query, term_id=term, predicate=predicate, since_seq=since_seq,
         regex=regex, ignore_case=ignore_case,
     )
     if not events:
@@ -241,7 +241,7 @@ def releases(artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact dire
 
 
 def _render_timeline(
-    mondo_id: str,
+    term_id: str,
     header: TermHeader | None,
     changes: list[Change],
     limit: int | None = None,
@@ -249,7 +249,7 @@ def _render_timeline(
     full: bool = False,
 ) -> None:
     if not changes:
-        console.print(f"[yellow]No history for[/] {mondo_id}")
+        console.print(f"[yellow]No history for[/] {term_id}")
         return
     total_events = len(changes)
     if since_seq is not None:
@@ -262,7 +262,7 @@ def _render_timeline(
         keep = set(seqs[-limit:])
         changes = [c for c in changes if c.commit_seq in keep]
 
-    _render_header(mondo_id, header, changes, total_events, limit, since_seq)
+    _render_header(term_id, header, changes, total_events, limit, since_seq)
 
     cap = None if full else render.DEFAULT_TRUNCATE
     for _, group in groupby(changes, key=lambda c: c.commit_seq):
@@ -285,7 +285,7 @@ def _render_timeline(
 
 
 def _render_header(
-    mondo_id: str,
+    term_id: str,
     header: TermHeader | None,
     changes: list[Change],
     total_events: int,
@@ -294,7 +294,7 @@ def _render_header(
 ) -> None:
     """Print the orientation header: name, span, and predicate counts."""
     title = Text()
-    title.append(mondo_id, style="bold cyan")
+    title.append(term_id, style="bold cyan")
     if header is not None and header.current_name:
         title.append(f" — {header.current_name}", style="bold")
     console.print(title)
@@ -352,14 +352,14 @@ def _render_commit_view(
     console.print(header_line)
     if head.pr_number is not None:
         _print_pr_link(head.pr_number)
-    n_terms = len({tc.mondo_id for tc in events})
+    n_terms = len({tc.term_id for tc in events})
     console.print(Text(f"{n_terms} terms changed", style="dim"))
 
     cap = None if full else render.DEFAULT_TRUNCATE
-    for mondo_id, group in groupby(events, key=lambda tc: tc.mondo_id):
+    for term_id, group in groupby(events, key=lambda tc: tc.term_id):
         rows = list(group)
         title = Text("\n")
-        title.append(mondo_id, style="bold cyan")
+        title.append(term_id, style="bold cyan")
         if rows[0].name:
             title.append(f" — {rows[0].name}", style="bold")
         console.print(title)
@@ -372,7 +372,7 @@ def _render_diff_view(
     ref_a: str, ref_b: str, events: list[TermChange], full: bool = False
 ) -> None:
     """Structural view of a range diff: per-term sections, per-commit sub-groups."""
-    n_terms = len({tc.mondo_id for tc in events})
+    n_terms = len({tc.term_id for tc in events})
     n_commits = len({tc.change.commit_seq for tc in events})
     summary = Text()
     summary.append(f"{len(events)}", style="bold")
@@ -389,7 +389,7 @@ def _render_search_view(
     query: str, events: list[TermChange], full: bool = False
 ) -> None:
     """Structural view of search hits: same layout as the diff view."""
-    n_terms = len({tc.mondo_id for tc in events})
+    n_terms = len({tc.term_id for tc in events})
     n_commits = len({tc.change.commit_seq for tc in events})
     summary = Text()
     summary.append(f"Found {len(events)}", style="bold")
@@ -410,14 +410,14 @@ def _render_events_by_term_and_commit(
     """Group ``events`` by term, then by commit within each term, and render.
 
     Shared between ``diff`` and ``search``. Expects ``events`` already
-    ordered by ``(mondo_id, commit_seq, ...)`` so the groupings are
+    ordered by ``(term_id, commit_seq, ...)`` so the groupings are
     contiguous.
     """
     cap = None if full else render.DEFAULT_TRUNCATE
-    for mondo_id, term_group in groupby(events, key=lambda tc: tc.mondo_id):
+    for term_id, term_group in groupby(events, key=lambda tc: tc.term_id):
         term_rows = list(term_group)
         title = Text("\n")
-        title.append(mondo_id, style="bold cyan")
+        title.append(term_id, style="bold cyan")
         # Take the most recent name we saw in the range as the section header.
         latest_name = next(
             (tc.name for tc in reversed(term_rows) if tc.name is not None), None
@@ -442,12 +442,12 @@ def _render_events_by_term_and_commit(
                 console.print(render.render_op(op, truncate=cap))
 
 
-def _render_state(mondo_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
+def _render_state(term_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
     if not clauses:
-        console.print(f"[yellow]{mondo_id} has no snapshot at or before {at}[/]")
+        console.print(f"[yellow]{term_id} has no snapshot at or before {at}[/]")
         return
-    console.print(f"[bold cyan]{mondo_id}[/] as of {at}:")
-    console.print(Text(f"  id: {mondo_id}"))
+    console.print(f"[bold cyan]{term_id}[/] as of {at}:")
+    console.print(Text(f"  id: {term_id}"))
     for predicate, value in clauses:
         console.print(Text(f"  {predicate}: {value}"))
 

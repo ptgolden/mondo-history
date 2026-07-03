@@ -41,7 +41,7 @@ Chosen stack:
   (change detected by content-hashing each normalized term frame). Reconstructing
   "state of `MONDO:x` at commit `c`" = the latest snapshot with `commit_seq <= seq(c)`.
 - **Change events**, materialized by diffing adjacent snapshots of the same term:
-  `(mondo_id, commit_seq, predicate, value, operation)` where operation ∈ {add, remove}.
+  `(term_id, commit_seq, predicate, value, operation)` where operation ∈ {add, remove}.
   A synonym text edit is naturally a remove+add of that clause. This table is the
   queryable spine for "when did X change".
 - Snapshots are the source of truth; events are a convenience view over them.
@@ -75,10 +75,10 @@ Chosen stack:
 - **`releases`** — release tags mapped to commits: `tag`, `sha`, `date`, `commit_seq`.
   Enables "what changed between two releases".
 - **`term_snapshots`** — one row per (term, commit-where-it-changed):
-  `mondo_id`, `commit_seq`, `sha`, `name`, `is_obsolete`, `replaced_by`,
+  `term_id`, `commit_seq`, `sha`, `name`, `is_obsolete`, `replaced_by`,
   `content_hash`, `clauses` (list<struct{predicate, value}> — canonical normalized
   frame), `frame_text` (canonical OBO serialization for exact reconstruction).
-- **`events`** — derived: `mondo_id`, `commit_seq`, `sha`, `predicate`, `value`,
+- **`events`** — derived: `term_id`, `commit_seq`, `sha`, `predicate`, `value`,
   `operation` (add|remove). Semantic events (term_created / term_obsoleted /
   term_merged) are just filtered views over this table.
 - **`build_meta`** — schema version, generator version, source repo URL, source
@@ -97,7 +97,7 @@ commits) so point-in-time queries are simple range comparisons.
 2. `git log --follow --reverse --format=... -- <path>` → ordered commit list;
    parse PR numbers from messages; collect tags → `releases`.
 3. Stream commits oldest→newest, holding only the *previous* version's
-   `{mondo_id: (content_hash, clauses)}` in memory:
+   `{term_id: (content_hash, clauses)}` in memory:
    - `git cat-file blob <sha>:<path>` → bytes.
    - Parse with **fastobo**. Trust it — no defensive fallback parser, no
      per-commit "unparseable" flagging. If fastobo raises, the build fails loudly.

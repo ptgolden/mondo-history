@@ -36,8 +36,8 @@ def test_parallel_build_matches_single(obo_repo: Path, tmp_path: Path):
     build_parallel(str(obo_repo), OBO, parallel, jobs=3)
 
     ds, dp = HistoryDB(single), HistoryDB(parallel)
-    ev_cols = "mondo_id, commit_seq, operation, predicate, value"
-    sn_cols = "mondo_id, commit_seq, content_hash"
+    ev_cols = "term_id, commit_seq, operation, predicate, value"
+    sn_cols = "term_id, commit_seq, content_hash"
     assert _multiset(ds, "events", ev_cols) == _multiset(dp, "events", ev_cols)
     assert _multiset(ds, "term_snapshots", sn_cols) == _multiset(dp, "term_snapshots", sn_cols)
     ds.close()
@@ -53,7 +53,7 @@ def test_chunk_size_does_not_change_output(obo_repo: Path, tmp_path: Path):
     build_parallel(str(obo_repo), OBO, many, jobs=2, chunk_size=1)
 
     ds, dm = HistoryDB(single), HistoryDB(many)
-    cols = "mondo_id, commit_seq, operation, predicate, value"
+    cols = "term_id, commit_seq, operation, predicate, value"
     assert _multiset(ds, "events", cols) == _multiset(dm, "events", cols)
     ds.close()
     dm.close()
@@ -79,9 +79,9 @@ def test_removing_an_unparseable_term_does_not_crash(bad_then_removed_repo: Path
 
     db = HistoryDB(out)
     good = db.con.execute(
-        "SELECT count(*) FROM term_snapshots WHERE mondo_id = 'MONDO:0000001'"
+        "SELECT count(*) FROM term_snapshots WHERE term_id = 'MONDO:0000001'"
     ).fetchone()[0]
-    skipped_ids = {r[0] for r in db.con.execute("SELECT DISTINCT mondo_id FROM skipped").fetchall()}
+    skipped_ids = {r[0] for r in db.con.execute("SELECT DISTINCT term_id FROM skipped").fetchall()}
     db.close()
 
     assert good >= 1  # the good term is indexed
@@ -158,7 +158,7 @@ def test_diff_between_release_and_head(artifact: Path):
     rows = db.range_events("v1.0", "4")
     db.close()
     assert [
-        (r.mondo_id, r.change.operation, r.change.predicate) for r in rows
+        (r.term_id, r.change.operation, r.change.predicate) for r in rows
     ] == [("MONDO:0000002", "add", "name")]
 
 
@@ -195,7 +195,7 @@ def test_commit_events_lists_co_changed(artifact: Path):
     db.close()
 
     assert head is not None and head.sha == sha
-    terms = {tc.mondo_id for tc in events}
+    terms = {tc.term_id for tc in events}
     assert "MONDO:0000002" in terms
 
 
@@ -205,7 +205,7 @@ def test_search_events_finds_substring(artifact: Path):
     events = db.search_events("illness")
     db.close()
     assert len(events) == 1
-    assert events[0].mondo_id == "MONDO:0000001"
+    assert events[0].term_id == "MONDO:0000001"
     assert events[0].change.operation == "add"
     assert events[0].change.predicate == "synonym"
     assert "illness" in events[0].change.value
@@ -234,11 +234,11 @@ def test_search_events_term_filter_narrows(artifact: Path):
     # Restricting to MONDO:0000002 keeps the hit; restricting to a term
     # without the string drops it.
     db = HistoryDB(artifact)
-    hits = db.search_events("cancer", mondo_id="MONDO:0000002")
-    off_term = db.search_events("cancer", mondo_id="MONDO:0000001")
+    hits = db.search_events("cancer", term_id="MONDO:0000002")
+    off_term = db.search_events("cancer", term_id="MONDO:0000001")
     db.close()
     assert len(hits) == 1
-    assert hits[0].mondo_id == "MONDO:0000002"
+    assert hits[0].term_id == "MONDO:0000002"
     assert hits[0].change.predicate == "name"
     assert off_term == []
 
