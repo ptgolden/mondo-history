@@ -229,7 +229,7 @@ def search(
         console.print(f'[yellow]No events matching[/] "{query}"')
         db.close()
         return
-    _render_search_view(query, events, full=full)
+    _render_search_view(query, events, regex=regex, ignore_case=ignore_case, full=full)
     db.close()
 
 
@@ -395,9 +395,27 @@ def _render_diff_view(
 
 
 def _render_search_view(
-    query: str, events: list[TermChange], full: bool = False
+    query: str,
+    events: list[TermChange],
+    regex: bool = False,
+    ignore_case: bool = False,
+    full: bool = False,
 ) -> None:
-    """Structural view of search hits: same layout as the diff view."""
+    """Structural view of search hits: same layout as the diff view.
+
+    Before rendering, apply a clause-aware post-filter: for any paired
+    ``Edit`` whose delta (body-diff, comment-diff, or qualifier symmetric
+    difference) doesn't actually contain the query, drop both constituent
+    events. Unpaired adds/removes are always kept — their whole clause is
+    "the change" by definition, so the SQL match already tells us the query
+    is in the changed portion.
+
+    See :func:`mondo_history.render.edit_delta_matches` for the exact rule.
+    """
+    events = _filter_events_by_delta_match(events, query, regex, ignore_case)
+    if not events:
+        console.print(f'[yellow]No events matching[/] "{query}"')
+        return
     n_terms = len({tc.term_id for tc in events})
     n_commits = len({tc.change.commit_seq for tc in events})
     summary = Text()
@@ -411,6 +429,37 @@ def _render_search_view(
     summary.append(" commits", style="dim")
     console.print(summary)
     _render_events_by_term_and_commit(events, full=full)
+
+
+def _filter_events_by_delta_match(
+    events: list[TermChange], query: str, regex: bool, ignore_case: bool
+) -> list[TermChange]:
+    """Drop paired-edit event pairs whose delta doesn't contain the query.
+
+    Pairs events per commit, drops both halves of any ``Edit`` whose
+    :func:`~mondo_history.render.edit_delta_matches` returns False, and
+    keeps every unpaired ``Add`` / ``Remove`` as-is. Preserves the input
+    order at the (term_id, commit_seq) granularity so the downstream
+    ``groupby`` in :func:`_render_events_by_term_and_commit` still sees
+    contiguous groupings.
+    """
+    surviving: list[TermChange] = []
+    for _, group in groupby(
+        events, key=lambda tc: (tc.term_id, tc.change.commit_seq)
+    ):
+        group_events = list(group)
+        by_change_id = {id(tc.change): tc for tc in group_events}
+        changes = [tc.change for tc in group_events]
+        for op in render.pair_events(changes):
+            if isinstance(op, render.Edit):
+                if render.edit_delta_matches(op, query, regex, ignore_case):
+                    surviving.append(by_change_id[id(op.before)])
+                    surviving.append(by_change_id[id(op.after)])
+            elif isinstance(op, render.Add):
+                surviving.append(by_change_id[id(op.change)])
+            else:  # Remove
+                surviving.append(by_change_id[id(op.change)])
+    return surviving
 
 
 def _render_events_by_term_and_commit(

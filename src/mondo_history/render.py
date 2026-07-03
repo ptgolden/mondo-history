@@ -246,6 +246,67 @@ def _clause_to_parsed(clause) -> ParsedValue:
     return ParsedValue(body=body, qualifiers=qualifiers, comment=comment)
 
 
+def _matches(text: str, query: str, regex: bool, ignore_case: bool) -> bool:
+    """Substring or regex match, honoring ``ignore_case`` — mirrors SQL layer."""
+    if regex:
+        flags = re.IGNORECASE if ignore_case else 0
+        return re.search(query, text, flags) is not None
+    if ignore_case:
+        return query.lower() in text.lower()
+    return query in text
+
+
+def edit_delta_matches(
+    edit: Edit,
+    query: str,
+    regex: bool = False,
+    ignore_case: bool = False,
+) -> bool:
+    """Whether ``query`` appears in the portion of the clause that changed.
+
+    For paired ``Edit`` ops, an add and a remove pair into one ``~`` line and
+    only some portion of the clause actually changed. This is what "changed"
+    means, precisely:
+
+    * The **body**, if ``before.body != after.body`` (either side counts).
+    * The trailing **``!`` comment**, if it differs (either side counts).
+    * Any **qualifier** in the symmetric difference of the two qualifier
+      multisets (i.e. a qualifier that was added or removed, but not one
+      present on both sides).
+
+    Kept-unchanged body, kept-unchanged comment, and kept-unchanged
+    qualifiers do **not** count — if the query only appears there, the
+    edit's delta doesn't actually involve the query.
+
+    Fallback: if either side can't be parsed via fastobo, return ``True``
+    (safe default; preserves current behavior on the historical malformed
+    clauses fastobo rejects).
+    """
+    before = parse_clause_value(edit.predicate, edit.before.value)
+    after = parse_clause_value(edit.predicate, edit.after.value)
+    if before is None or after is None:
+        return True
+
+    def check(text: str | None) -> bool:
+        return text is not None and _matches(text, query, regex, ignore_case)
+
+    if before.body != after.body:
+        if check(before.body) or check(after.body):
+            return True
+    if before.comment != after.comment:
+        if check(before.comment) or check(after.comment):
+            return True
+    # Qualifier symmetric difference via Counter multiset diff.
+    b_counts = Counter(before.qualifiers)
+    a_counts = Counter(after.qualifiers)
+    only_before = b_counts - a_counts
+    only_after = a_counts - b_counts
+    for qualifier in list(only_before) + list(only_after):
+        if _matches(qualifier, query, regex, ignore_case):
+            return True
+    return False
+
+
 def render_op(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> Text:
     """Render one paired-or-unpaired event as a rich ``Text`` line."""
     if isinstance(op, Add):
