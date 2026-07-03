@@ -11,7 +11,7 @@ without cloning the full repository or doing GitHub archaeology. The vision doc
 deliberately leaves the implementation unspecified. This document commits to
 concrete choices.
 
-`mondo-history` is a **separate artifact** from Mondo. The extraction step builds
+`obohist` is a **separate artifact** from Mondo. The extraction step builds
 its *own* clone of Mondo — scoped to a single file's history (see §3) — as a
 build-time input. `../mondo` is only a shallow, depth-1 snapshot and is **not**
 used as the history source. The artifact is entirely *derived from* Mondo's git
@@ -123,7 +123,7 @@ their own invariants and raise on violation. Avoid speculative edge-case handlin
 
 ## Interfaces (all thin DuckDB SQL over the same Parquet)
 
-CLI (`mondo-history`):
+CLI (`obohist`):
 - `term MONDO:x` — event timeline for a term.
 - `term MONDO:x --at <sha|date|release>` — reconstructed snapshot at that point.
 - `synonyms|xrefs|parents MONDO:x` — filtered event history for one field kind.
@@ -142,7 +142,7 @@ HTTP via DuckDB httpfs), no independent representation.
 ```
 DESIGN.md                     # this document
 pyproject.toml                # deps: fastobo, duckdb, pyarrow, click/typer
-src/mondo_history/
+src/obohist/
   extract.py                  # git walk + fastobo parse + diff → Parquet
   gitsource.py                # blobless clone / repo acquisition, log --follow
   obo.py                      # frame normalization, canonical clause set, hashing
@@ -234,7 +234,7 @@ tests/
   versions), ~912 MB single pack, gitignored. The full build runs **offline**
   against it (`GIT_NO_LAZY_FETCH=1`).
 - `./artifact/` — the built history artifact from that clone. The
-  `mondo-history term MONDO:0012350` example in `README.md` reads from it.
+  `obohist term MONDO:0012350` example in `README.md` reads from it.
 
 **Validated:** parallel build produces byte-identical events/snapshots to the
 single-threaded build (checksum match on a 12-commit slice).
@@ -250,7 +250,7 @@ single-threaded build (checksum match on a 12-commit slice).
    fastobo-parsed body + qualifier sets; the missing piece is grouping events
    by body within a predicate bucket before pairing.
 4. **Structure-aware `diff` and `commit` renderers** — reuse `pair_events` and
-   `render_op` in `mondo-history diff` and `mondo-history commit` for the same
+   `render_op` in `obohist diff` and `obohist commit` for the same
    quality of output.
 5. **If size matters** — evaluate the keyframe + event-replay variant to shrink
    `term_snapshots`.

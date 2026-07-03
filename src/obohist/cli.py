@@ -32,7 +32,7 @@ def _print_pr_link(pr_number: int) -> None:
     line.append(url, style=f"link {url} dim cyan")
     console.print(line)
 
-app = typer.Typer(add_completion=False, help="Build and query the Mondo history index.")
+app = typer.Typer(add_completion=False, help="Build and query an OBO ontology history index.")
 console = Console()
 
 
@@ -410,7 +410,7 @@ def _render_search_view(
     "the change" by definition, so the SQL match already tells us the query
     is in the changed portion.
 
-    See :func:`mondo_history.render.edit_delta_matches` for the exact rule.
+    See :func:`obohist.render.edit_delta_matches` for the exact rule.
     """
     events = _filter_events_by_delta_match(events, query, regex, ignore_case)
     if not events:
@@ -437,7 +437,7 @@ def _filter_events_by_delta_match(
     """Drop paired-edit event pairs whose delta doesn't contain the query.
 
     Pairs events per commit, drops both halves of any ``Edit`` whose
-    :func:`~mondo_history.render.edit_delta_matches` returns False, and
+    :func:`~obohist.render.edit_delta_matches` returns False, and
     keeps every unpaired ``Add`` / ``Remove`` as-is. Preserves the input
     order at the (term_id, commit_seq) granularity so the downstream
     ``groupby`` in :func:`_render_events_by_term_and_commit` still sees

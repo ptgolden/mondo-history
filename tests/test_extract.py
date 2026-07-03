@@ -5,9 +5,9 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from mondo_history.extract import build_parallel, extract
-from mondo_history.gitsource import GitSource
-from mondo_history.query import ArtifactNotFound, HistoryDB
+from obohist.extract import build_parallel, extract
+from obohist.gitsource import GitSource
+from obohist.query import ArtifactNotFound, HistoryDB
 
 OBO = "src/onto.obo"
 
@@ -89,7 +89,7 @@ def test_removing_an_unparseable_term_does_not_crash(bad_then_removed_repo: Path
 
 
 def test_missing_artifact_raises_clear_error(tmp_path: Path):
-    with pytest.raises(ArtifactNotFound, match="Run `mondo-history build`"):
+    with pytest.raises(ArtifactNotFound, match="Run `obohist build`"):
         HistoryDB(tmp_path / "does-not-exist")
 
 

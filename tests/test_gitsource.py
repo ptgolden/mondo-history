@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from mondo_history.gitsource import GitSource
+from obohist.gitsource import GitSource
 
 OBO = "src/onto.obo"
 
