@@ -115,6 +115,22 @@ class GitSource:
         _run(cmd, cwd=None)
         return cls(dest)
 
+    def backfill_file(self, path: str) -> None:
+        """Pre-fetch every historical blob of ``path`` in one delta-packed pass.
+
+        A ``--filter=blob:none`` clone starts with zero blob content. Even a
+        plain ``git log --follow -- <path>`` needs blob content for rename
+        detection, so an on-demand lazy-fetch happens sooner than one might
+        expect. Rather than let git make thousands of tiny fetches during the
+        build, we set the sparse-checkout to just ``path`` and call
+        ``git backfill --sparse``, which asks the promisor remote for every
+        blob that is currently missing under the sparse pattern in one batched
+        delta-packed transfer. Idempotent — subsequent runs are near-free.
+        """
+        _run(["git", "sparse-checkout", "init"], cwd=self.repo_dir)
+        _run(["git", "sparse-checkout", "set", path], cwd=self.repo_dir)
+        _run(["git", "backfill", "--sparse"], cwd=self.repo_dir)
+
     def iter_file_history(self, path: str) -> Iterator[FileVersion]:
         """Yield every version of ``path``, oldest first, following renames.
 

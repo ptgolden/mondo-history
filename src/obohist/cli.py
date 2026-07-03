@@ -174,20 +174,33 @@ def source_sync(
 
 
 def _ensure_source_clone(source: SourceConfig, since: Optional[str]) -> str:
-    """Return the path to source's clone, cloning it (blob-filtered) if missing."""
-    if source.clone_dir.exists():
+    """Return the path to source's clone, cloning it (blob-filtered) if missing.
+
+    After the initial clone, we run ``git backfill --sparse`` scoped to the
+    source's OBO file. That pulls every historical blob of just that one file
+    in a single delta-packed transfer — much cheaper than the surprise
+    lazy-fetches ``git log --follow`` would otherwise trigger for rename
+    detection during the build. Backfill is idempotent, so it's cheap to call
+    again on a reused clone in case the source's file path changed.
+    """
+    if not source.clone_dir.exists():
+        bound = f", since {since}" if since else ""
+        console.print(
+            f"Cloning [cyan]{source.repo}[/] (blob-filtered{bound}) → "
+            f"{source.clone_dir} …"
+        )
+        source.clone_dir.parent.mkdir(parents=True, exist_ok=True)
+        GitSource.clone(source.repo, source.clone_dir, since=since).close()
+    else:
         console.print(
             f"Reusing clone at [cyan]{source.clone_dir}[/] "
             "(delete it to re-clone with different bounds)."
         )
-        return str(source.clone_dir)
-    bound = f", since {since}" if since else ""
     console.print(
-        f"Cloning [cyan]{source.repo}[/] (blob-filtered{bound}) → "
-        f"{source.clone_dir} …"
+        f"Backfilling blobs for [cyan]{source.file}[/] "
+        "(one delta-packed fetch of all historical versions) …"
     )
-    source.clone_dir.parent.mkdir(parents=True, exist_ok=True)
-    GitSource.clone(source.repo, source.clone_dir, since=since).close()
+    GitSource(source.clone_dir).backfill_file(source.file)
     return str(source.clone_dir)
 
 
