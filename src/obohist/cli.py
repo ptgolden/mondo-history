@@ -74,27 +74,40 @@ def source_list(
         raise typer.Exit(1)
     console.print(f"[dim]Config:[/]  {cfg.path}")
     console.print(f"[dim]Storage:[/] {cfg.storage}")
-    console.print()
     if not cfg.sources:
-        console.print("[yellow]No sources configured.[/]")
+        console.print("\n[yellow]No sources configured.[/]")
         return
+    from rich.table import Table
+
+    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    table.add_column("name", style="bold cyan", no_wrap=True)
+    table.add_column("repo", style="dim", overflow="fold")
+    table.add_column("file", style="dim", overflow="fold")
+    table.add_column("status", style="dim", no_wrap=True)
+    table.add_column("commits", style="dim", no_wrap=True, justify="right")
+    table.add_column("clone", style="dim", no_wrap=True, justify="right")
+    table.add_column("db", style="dim", no_wrap=True, justify="right")
     for name, source in cfg.sources.items():
-        _print_source_row(name, source)
+        status, commits = _source_status(source)
+        clone = _fmt_size(_dir_size(source.clone_dir))
+        db = _fmt_size(_dir_size(source.db_dir))
+        table.add_row(
+            name, _short_repo(source.repo), source.file,
+            status, commits, clone, db,
+        )
+    console.print()
+    console.print(table)
 
 
-def _print_source_row(name: str, source: SourceConfig) -> None:
-    """One line: source name, repo, status, commit count, clone / db sizes."""
-    line = Text()
-    line.append(f"{name:<10}", style="bold cyan")
-    line.append(f"  {source.repo:<48}", style="dim")
-    status, commits = _source_status(source)
-    line.append(f"  {status:<12}", style="dim")
-    line.append(f"  {commits:>10}", style="dim")
-    clone_size = _dir_size(source.clone_dir)
-    db_size = _dir_size(source.db_dir)
-    line.append(f"  clone {_fmt_size(clone_size):>7}", style="dim")
-    line.append(f"  db {_fmt_size(db_size):>7}", style="dim")
-    console.print(line)
+def _short_repo(repo: str) -> str:
+    """`https://github.com/owner/name(.git)?` → `owner/name`; other URLs pass through."""
+    trimmed = repo.rstrip("/")
+    if trimmed.endswith(".git"):
+        trimmed = trimmed[: -len(".git")]
+    parts = trimmed.split("/")
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return repo
 
 
 def _source_status(source: SourceConfig) -> tuple[str, str]:
