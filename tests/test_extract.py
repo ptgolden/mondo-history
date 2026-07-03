@@ -197,3 +197,58 @@ def test_commit_events_lists_co_changed(artifact: Path):
     assert head is not None and head.sha == sha
     terms = {tc.mondo_id for tc in events}
     assert "MONDO:0000002" in terms
+
+
+def test_search_events_finds_substring(artifact: Path):
+    # The "illness" synonym was added on c1 for MONDO:0000001.
+    db = HistoryDB(artifact)
+    events = db.search_events("illness")
+    db.close()
+    assert len(events) == 1
+    assert events[0].mondo_id == "MONDO:0000001"
+    assert events[0].change.operation == "add"
+    assert events[0].change.predicate == "synonym"
+    assert "illness" in events[0].change.value
+
+
+def test_search_events_empty_when_no_match(artifact: Path):
+    db = HistoryDB(artifact)
+    assert db.search_events("nonexistent-string-that-cannot-occur") == []
+    db.close()
+
+
+def test_search_events_predicate_filter_narrows(artifact: Path):
+    # DOID:4 was added as an xref on c3. Filtering by predicate=xref keeps it;
+    # filtering by predicate=synonym drops it even though it's the same needle.
+    db = HistoryDB(artifact)
+    xrefs = db.search_events("DOID:4", predicate="xref")
+    synonyms = db.search_events("DOID:4", predicate="synonym")
+    db.close()
+    assert len(xrefs) == 1 and xrefs[0].change.predicate == "xref"
+    assert synonyms == []
+
+
+def test_search_events_term_filter_narrows(artifact: Path):
+    # MONDO:0000002 is created at c4 with `name: cancer` — that lands in the
+    # events table because c4 is diffed against c3 (which had no such term).
+    # Restricting to MONDO:0000002 keeps the hit; restricting to a term
+    # without the string drops it.
+    db = HistoryDB(artifact)
+    hits = db.search_events("cancer", mondo_id="MONDO:0000002")
+    off_term = db.search_events("cancer", mondo_id="MONDO:0000001")
+    db.close()
+    assert len(hits) == 1
+    assert hits[0].mondo_id == "MONDO:0000002"
+    assert hits[0].change.predicate == "name"
+    assert off_term == []
+
+
+def test_search_events_since_filter_cuts_off_early_commits(artifact: Path):
+    # The "illness" synonym was added on c1 (commit_seq 1). A --since cutoff
+    # of seq 2 must exclude it.
+    db = HistoryDB(artifact)
+    all_hits = db.search_events("illness")
+    after_c1 = db.search_events("illness", since_seq=2)
+    db.close()
+    assert len(all_hits) == 1
+    assert after_c1 == []

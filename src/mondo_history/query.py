@@ -290,6 +290,67 @@ class HistoryDB:
             for mondo_id, name, seq, date, sha, author, pr, message, op, pred, val in rows
         ]
 
+    def search_events(
+        self,
+        query: str,
+        mondo_id: str | None = None,
+        predicate: str | None = None,
+        since_seq: int | None = None,
+    ) -> list[TermChange]:
+        """Events whose clause ``value`` contains ``query`` as a substring.
+
+        "Which commits added or removed a clause containing this string?" —
+        analogous to ``git log -S<string>`` at the file-line level, but on
+        our clause-event granularity. Uses DuckDB's built-in ``contains()``
+        so the query is a plain substring, no LIKE wildcard escaping.
+
+        Optional narrowings (all AND'd together): ``mondo_id`` restricts to
+        one term, ``predicate`` restricts to one clause kind (``xref``,
+        ``is_a``, ...), ``since_seq`` cuts off commits older than the
+        supplied ``commit_seq`` (resolve external refs via
+        :meth:`resolve_ref` in the caller).
+
+        Rows come back ordered ``(mondo_id, commit_seq, operation,
+        predicate, value)`` so grouping-by-term-then-commit feeds the
+        render pipeline directly.
+        """
+        where = "contains(e.value, ?)"
+        params: list[object] = [query]
+        if mondo_id is not None:
+            where += " AND e.mondo_id = ?"
+            params.append(mondo_id)
+        if predicate is not None:
+            where += " AND e.predicate = ?"
+            params.append(predicate)
+        if since_seq is not None:
+            where += " AND e.commit_seq >= ?"
+            params.append(since_seq)
+        rows = self.con.execute(
+            f"""
+            SELECT e.mondo_id, s.name,
+                   c.commit_seq, c.committed_date, c.sha, c.author_name,
+                   c.pr_number, c.message,
+                   e.operation, e.predicate, e.value
+            FROM events e
+            JOIN commits c USING (commit_seq)
+            LEFT JOIN term_snapshots s
+              ON s.mondo_id = e.mondo_id AND s.commit_seq = e.commit_seq
+            WHERE {where}
+            ORDER BY e.mondo_id, c.commit_seq, e.operation, e.predicate, e.value
+            """,
+            params,
+        ).fetchall()
+        return [
+            TermChange(
+                mondo_id=mondo_id,
+                name=name,
+                change=Change(
+                    seq, date, sha, author, pr, message, op, pred, val
+                ),
+            )
+            for mondo_id, name, seq, date, sha, author, pr, message, op, pred, val in rows
+        ]
+
     def releases(self) -> list[tuple[str, int, object]]:
         if not self._has_releases():
             return []

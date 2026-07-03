@@ -193,6 +193,33 @@ def diff(
 
 
 @app.command()
+def search(
+    query: str = typer.Argument(..., help="Substring to search for in event values."),
+    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    term: Optional[str] = typer.Option(None, help="Restrict to one term."),
+    predicate: Optional[str] = typer.Option(
+        None, help="Restrict to one clause kind, e.g. xref."
+    ),
+    since: Optional[str] = typer.Option(
+        None, help="Show events at/after this ref (short sha, tag, or commit_seq)."
+    ),
+    full: bool = typer.Option(False, help="Do not truncate long values."),
+):
+    """Find commits that added or removed a clause containing QUERY."""
+    db = _open(artifact)
+    since_seq = db.resolve_ref(since) if since is not None else None
+    events = db.search_events(
+        query, mondo_id=term, predicate=predicate, since_seq=since_seq
+    )
+    if not events:
+        console.print(f'[yellow]No events matching[/] "{query}"')
+        db.close()
+        return
+    _render_search_view(query, events, full=full)
+    db.close()
+
+
+@app.command()
 def releases(artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory.")):
     """List release tags indexed in this artifact."""
     db = _open(artifact)
@@ -350,7 +377,37 @@ def _render_diff_view(
     summary.append(f"{n_commits}", style="bold")
     summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
     console.print(summary)
+    _render_events_by_term_and_commit(events, full=full)
 
+
+def _render_search_view(
+    query: str, events: list[TermChange], full: bool = False
+) -> None:
+    """Structural view of search hits: same layout as the diff view."""
+    n_terms = len({tc.mondo_id for tc in events})
+    n_commits = len({tc.change.commit_seq for tc in events})
+    summary = Text()
+    summary.append(f"Found {len(events)}", style="bold")
+    summary.append(" events matching ", style="dim")
+    summary.append(f'"{query}"', style="bold")
+    summary.append(" across ", style="dim")
+    summary.append(f"{n_terms}", style="bold")
+    summary.append(" terms and ", style="dim")
+    summary.append(f"{n_commits}", style="bold")
+    summary.append(" commits", style="dim")
+    console.print(summary)
+    _render_events_by_term_and_commit(events, full=full)
+
+
+def _render_events_by_term_and_commit(
+    events: list[TermChange], full: bool = False
+) -> None:
+    """Group ``events`` by term, then by commit within each term, and render.
+
+    Shared between ``diff`` and ``search``. Expects ``events`` already
+    ordered by ``(mondo_id, commit_seq, ...)`` so the groupings are
+    contiguous.
+    """
     cap = None if full else render.DEFAULT_TRUNCATE
     for mondo_id, term_group in groupby(events, key=lambda tc: tc.mondo_id):
         term_rows = list(term_group)
