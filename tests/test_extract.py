@@ -252,3 +252,40 @@ def test_search_events_since_filter_cuts_off_early_commits(artifact: Path):
     db.close()
     assert len(all_hits) == 1
     assert after_c1 == []
+
+
+def test_search_events_ignore_case_substring(artifact: Path):
+    # "ILLNESS" (all caps) matches the "illness" synonym under --ignore-case;
+    # without the flag, it doesn't.
+    db = HistoryDB(artifact)
+    sensitive = db.search_events("ILLNESS")
+    insensitive = db.search_events("ILLNESS", ignore_case=True)
+    db.close()
+    assert sensitive == []
+    assert len(insensitive) == 1
+    assert insensitive[0].change.predicate == "synonym"
+
+
+def test_search_events_regex_matches(artifact: Path):
+    # The DOID:4 xref matches ^DOID:\d+$; the OMIM-style patterns don't.
+    db = HistoryDB(artifact)
+    doid_hits = db.search_events(r"^DOID:\d+$", regex=True)
+    omim_hits = db.search_events(r"^OMIM:\d+$", regex=True)
+    db.close()
+    assert len(doid_hits) == 1
+    assert doid_hits[0].change.predicate == "xref"
+    assert doid_hits[0].change.value == "DOID:4"
+    assert omim_hits == []
+
+
+def test_search_events_regex_ignore_case_combined(artifact: Path):
+    # Regex + --ignore-case: DOID uppercase pattern still matches even if the
+    # regex uses lowercase. Both flags combine via the 'i' option to
+    # regexp_matches.
+    db = HistoryDB(artifact)
+    sensitive = db.search_events(r"^doid:\d+$", regex=True)
+    insensitive = db.search_events(r"^doid:\d+$", regex=True, ignore_case=True)
+    db.close()
+    assert sensitive == []
+    assert len(insensitive) == 1
+    assert insensitive[0].change.value == "DOID:4"

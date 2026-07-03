@@ -296,13 +296,23 @@ class HistoryDB:
         mondo_id: str | None = None,
         predicate: str | None = None,
         since_seq: int | None = None,
+        regex: bool = False,
+        ignore_case: bool = False,
     ) -> list[TermChange]:
-        """Events whose clause ``value`` contains ``query`` as a substring.
+        """Events whose clause ``value`` matches ``query``.
 
-        "Which commits added or removed a clause containing this string?" —
-        analogous to ``git log -S<string>`` at the file-line level, but on
-        our clause-event granularity. Uses DuckDB's built-in ``contains()``
-        so the query is a plain substring, no LIKE wildcard escaping.
+        "Which commits added or removed a clause matching this?" —
+        analogous to ``git log -S<string>`` (default substring mode) or
+        ``git log -G<pattern>`` (``regex=True``) at the file-line level,
+        but on our clause-event granularity.
+
+        * ``regex=False`` (default): substring match via DuckDB's
+          ``contains()`` — no LIKE wildcard escape logic to write.
+        * ``regex=True``: full regex match via DuckDB's
+          ``regexp_matches()``. Invalid regex raises DuckDB's parse error
+          up to the caller.
+        * ``ignore_case=True``: applies to both modes — via ``LOWER()`` on
+          both sides for substring, via the ``'i'`` option flag for regex.
 
         Optional narrowings (all AND'd together): ``mondo_id`` restricts to
         one term, ``predicate`` restricts to one clause kind (``xref``,
@@ -314,7 +324,16 @@ class HistoryDB:
         predicate, value)`` so grouping-by-term-then-commit feeds the
         render pipeline directly.
         """
-        where = "contains(e.value, ?)"
+        if regex:
+            if ignore_case:
+                where = "regexp_matches(e.value, ?, 'i')"
+            else:
+                where = "regexp_matches(e.value, ?)"
+        else:
+            if ignore_case:
+                where = "contains(LOWER(e.value), LOWER(?))"
+            else:
+                where = "contains(e.value, ?)"
         params: list[object] = [query]
         if mondo_id is not None:
             where += " AND e.mondo_id = ?"

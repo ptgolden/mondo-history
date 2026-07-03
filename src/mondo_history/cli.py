@@ -194,7 +194,7 @@ def diff(
 
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="Substring to search for in event values."),
+    query: str = typer.Argument(..., help="Substring (or regex, with --regex) to match in event values."),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
     predicate: Optional[str] = typer.Option(
@@ -203,13 +203,18 @@ def search(
     since: Optional[str] = typer.Option(
         None, help="Show events at/after this ref (short sha, tag, or commit_seq)."
     ),
+    regex: bool = typer.Option(False, "--regex", help="Treat QUERY as a regular expression."),
+    ignore_case: bool = typer.Option(
+        False, "--ignore-case", "-i", help="Case-insensitive match."
+    ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
-    """Find commits that added or removed a clause containing QUERY."""
+    """Find commits that added or removed a clause matching QUERY."""
     db = _open(artifact)
     since_seq = db.resolve_ref(since) if since is not None else None
     events = db.search_events(
-        query, mondo_id=term, predicate=predicate, since_seq=since_seq
+        query, mondo_id=term, predicate=predicate, since_seq=since_seq,
+        regex=regex, ignore_case=ignore_case,
     )
     if not events:
         console.print(f'[yellow]No events matching[/] "{query}"')
