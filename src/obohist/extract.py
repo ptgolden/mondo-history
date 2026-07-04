@@ -277,8 +277,12 @@ def build_parallel(
     ticks = manager.Queue() if manager else None  # workers report per-commit
     try:
         with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as pool:
+            # Send the already-computed windowed versions to each worker so
+            # they don't each re-walk `git log --follow`. Pickle cost is small
+            # (dataclasses of str/int/datetime) and pays for itself many times
+            # over vs. per-worker subprocess overhead.
             futures = [
-                pool.submit(_build_chunk, clone_path, obo_path, str(out), offset, i, s, e, ticks)
+                pool.submit(_build_chunk, clone_path, windowed, str(out), i, s, e, ticks)
                 for i, (s, e) in enumerate(bounds)
             ]
             if progress:
@@ -348,15 +352,19 @@ def _chunk_bounds(n: int, k: int) -> list[tuple[int, int]]:
 
 def _build_chunk(
     clone_path: str,
-    obo_path: str,
+    windowed: list[FileVersion],
     out_dir: str,
-    offset: int,
     chunk_id: int,
     start: int,
     end: int,
     ticks=None,
 ) -> dict:
-    """Worker: parse+diff ``windowed[start:end]`` and stream part-files."""
+    """Worker: parse+diff ``windowed[start:end]`` and stream part-files.
+
+    ``windowed`` is the pre-computed versions list from the parent process,
+    so this worker doesn't re-walk `git log --follow` (which would repeat
+    the expensive branch-commit resolution for every worker).
+    """
     # fastobo prints Rust panics to stderr even though we catch them; a worker
     # has no other use for stderr (results and errors reach the parent via the
     # future), so silence it to keep the parent's progress bar clean.
@@ -364,7 +372,6 @@ def _build_chunk(
 
     out = Path(out_dir)
     src = GitSource(clone_path)
-    windowed = list(src.iter_file_history(obo_path))[offset:]
 
     state, raw = _seed_state(src, windowed, start)
     snap_rows: list[dict] = []

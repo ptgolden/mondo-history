@@ -148,9 +148,16 @@ class GitSource:
         ``--follow`` tracks the file across renames, so ``path`` need only be its
         *current* location; each yielded :class:`FileVersion` reports the path as
         it was at that commit. Commits that delete the file are skipped.
+
+        Branch commits for each merge are resolved via per-merge
+        ``git log first_parent..second_parent`` (the semantics we want),
+        cached by (first_parent, second_parent) so repeated identical pairs
+        pay only once. The heavier cost of that subprocess is contained to
+        the parent process — workers receive the pre-computed versions list.
         """
         commits = self._read_commits(path)
         blobs = self._read_blob_refs(path)  # sha -> (path, blob_oid) at that commit
+        branch_cache: dict[tuple[str, str], tuple[BranchCommit, ...]] = {}
 
         seq = 0
         for commit in commits:
@@ -164,12 +171,12 @@ class GitSource:
                 continue  # file removed at this commit; nothing to snapshot
             branch_commits: tuple[BranchCommit, ...] = ()
             if commit.parent_sha and commit.second_parent_sha:
-                # A merge: capture the commits on the merged branch (usually
-                # the PR-branch commits, in newest-first order matching what
-                # the reader sees on GitHub).
-                branch_commits = self.read_branch_commits(
-                    commit.parent_sha, commit.second_parent_sha
-                )
+                key = (commit.parent_sha, commit.second_parent_sha)
+                cached = branch_cache.get(key)
+                if cached is None:
+                    cached = self._read_branch_commits(*key)
+                    branch_cache[key] = cached
+                branch_commits = cached
             yield FileVersion(
                 commit=CommitInfo(
                     seq=seq,
@@ -280,7 +287,7 @@ class GitSource:
         commits.reverse()  # oldest first
         return commits
 
-    def read_branch_commits(
+    def _read_branch_commits(
         self, first_parent: str, second_parent: str
     ) -> tuple["BranchCommit", ...]:
         """Commits reachable from ``second_parent`` but not from ``first_parent``.
@@ -289,8 +296,14 @@ class GitSource:
         a GitHub-merged PR, the PR-branch commits in the order they'll be
         listed on the PR page. Returned newest-first so the tip (typically the
         one with the most descriptive final message) is prominent.
+
+        Delegates the reachability computation to git (``a..b`` semantics) —
+        computing it in memory got tangled up on cross-branch merges (a PR
+        whose branch itself merged main into it), which have PR-branch
+        commits reachable through the merged-in tip that aren't on the
+        first-parent chain from the tip.
         """
-        fmt = _FIELD.join(["%H", "%an", "%aI", "%B"]) + _RECORD
+        fmt = _FIELD.join(["%H", "%an", "%aI", "%s"]) + _RECORD
         try:
             out = _run(
                 [
@@ -302,25 +315,22 @@ class GitSource:
                 cwd=self.repo_dir,
             )
         except GitError:
-            # A missing branch (shallow clone, or a rewritten ref) shouldn't
-            # crash the build — just return nothing and let the merge show as
-            # a bare merge commit.
             return ()
-        out_list: list[BranchCommit] = []
+        result: list[BranchCommit] = []
         for record in out.split(_RECORD):
             record = record.strip("\n")
             if not record:
                 continue
-            sha, an, adate, message = record.split(_FIELD)
-            out_list.append(
+            sha, an, adate, subject = record.split(_FIELD)
+            result.append(
                 BranchCommit(
                     sha=sha,
                     author_name=an,
                     committed_date=datetime.fromisoformat(adate),
-                    message=message.strip(),
+                    message=subject,
                 )
             )
-        return tuple(out_list)
+        return tuple(result)
 
     def _read_blob_refs(self, path: str) -> dict[str, tuple[str, str]]:
         """Map each commit sha to (path_at_commit, blob_oid) via ``--raw``.
