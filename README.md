@@ -1,6 +1,6 @@
 # obohog
 
-*A queryable history of OBO ontology evolution.*
+* OBO History over Git *
 
 `obohog` builds a compact, queryable database describing how every term in
 an OBO ontology has changed over time. It answers ontology-level history
