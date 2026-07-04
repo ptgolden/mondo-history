@@ -140,6 +140,56 @@ CLI (`obohist`):
 - `pr <n>` — terms affected by a PR.
 - `diff <releaseA> <releaseB> [--term MONDO:x]` — changes between two releases.
 
+### Commit-header rendering: GitHub-specific heuristics with a graceful fallback
+
+`obohist term`, `commit`, `diff`, and `search` all render a per-commit header
+block: `sha  date  author  <subject line>`, followed optionally by a PR link
+and/or PR-branch commits. Two GitHub conventions inform how that subject line
+is chosen; both are heuristics rather than schema, and both degrade cleanly
+when the source isn't hosted on GitHub or the commit doesn't fit the shape.
+
+**PR number extraction** (see `extract._extract_pr_number`):
+
+- **Squash-and-merge** (post-2023 Mondo, most modern repos): the title ends
+  with `(#N)` — e.g., `add venom terms (#10409)`.
+- **Classic merge commit** (pre-2023 Mondo, PATO, older workflows): the first
+  line is `Merge pull request #N from user/branch`.
+
+The classic form is matched anchored to the start of the message so a PR body
+that quotes `(#123)` in prose doesn't false-positive over a real merge header.
+If neither matches, `pr_number` is `NULL` — no PR link, no `pr <N>` lookup.
+
+**PR-title-from-body extraction** (see `cli._pr_title_from_merge`):
+
+Classic GitHub merge commits carry the PR title in the message body:
+
+```
+Merge pull request #N from user/branch
+
+<PR title — often the branch's last commit subject, or set on the merge screen>
+
+<optional PR body>
+```
+
+When we find this shape, we render the PR title as the primary editorial line
+and demote the boilerplate `Merge pull request #N from …` to a dim italic
+sub-line. This makes classic-merge commits visually consistent with the
+one-line squash-and-merge style. Because the PR title is usually more
+informative than the aggregate of 30 tiny `revise xrefs` branch commits, we
+also **hide branch commits by default** in this case; `--commits` on any
+render command opts back in.
+
+**Non-GitHub sources**: `_pr_url_base` returns `None` for anything that
+isn't `https://github.com/owner/name`. In that case:
+
+- PR links become plain dim text `→ PR #N` (no URL, but the tag is still
+  visible).
+- Classic-merge PR-title extraction still works — it operates on the
+  message body, not on GitHub metadata — so any repo that uses GitHub's
+  merge-commit format gets the nicer rendering even if it's mirrored to a
+  different host. Repos with a different merge convention gracefully fall
+  through to raw-subject rendering.
+
 Programmatic API: a small Python module exposing the same queries (returns
 DataFrames/dicts). Hosted web app: reads the identical Parquet (optionally over
 HTTP via DuckDB httpfs), no independent representation.

@@ -45,6 +45,70 @@ def _print_pr_link(pr_number: int) -> None:
     console.print(line)
 
 
+# Classic GitHub merge commit: line 1 is boilerplate, line 3+ is the PR title
+# (whatever the PR was named on GitHub — usually the branch's last commit
+# subject, or a manual title set on the merge screen). We use that title as
+# the primary editorial line, demote the boilerplate to a dim sub-line, and
+# hide branch commits by default (drill in via `obohist pr <N>` if needed).
+_MERGE_BOILERPLATE = re.compile(r"^Merge pull request #(\d+) from ")
+
+
+def _pr_title_from_merge(message: str) -> str | None:
+    """Return the PR title embedded in a classic GitHub merge commit body.
+
+    GitHub-specific heuristic: when line 1 matches ``Merge pull request #N
+    from …``, GitHub's default merge screen puts the PR title in the body
+    (line 3+). Returns the first non-empty body line, or None if the
+    message isn't a classic merge or has no body content. For non-GitHub
+    sources (or GitHub merges with empty bodies) callers should fall back
+    to rendering the raw subject line.
+    """
+    lines = message.splitlines()
+    if not lines or not _MERGE_BOILERPLATE.match(lines[0]):
+        return None
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _render_commit_header(head, prefix: Text, show_commits: bool = False) -> None:
+    """Given an already-built ``sha  date  author  `` prefix Text, append the
+    editorial subject line and print, followed by any demoted boilerplate,
+    PR link, and branch commits.
+
+    Classic GitHub merge commits with a PR title in the body:
+      * primary line: the PR title (editorial)
+      * next line: the boilerplate ``Merge pull request #N from …`` demoted
+        to dim italic
+      * branch commits: hidden unless ``show_commits=True``
+
+    Everything else (squash-and-merge, non-GitHub, or classic merge with
+    empty body):
+      * primary line: the raw subject
+      * branch commits: shown when present (only editorial signal for
+        old-style merges with empty bodies)
+    """
+    pr_title = _pr_title_from_merge(head.message)
+    subject = head.message.splitlines()[0] if head.message else ""
+    if pr_title is not None:
+        prefix.append(pr_title, style="dim")
+        console.print(prefix)
+        console.print(Text("      " + subject, style="dim italic"))
+        if head.pr_number is not None:
+            _print_pr_link(head.pr_number)
+        if show_commits and head.branch_commits:
+            _print_branch_commits(head.branch_commits)
+    else:
+        prefix.append(subject, style="dim")
+        console.print(prefix)
+        if head.pr_number is not None:
+            _print_pr_link(head.pr_number)
+        if head.branch_commits:
+            _print_branch_commits(head.branch_commits)
+
+
 def _print_branch_commits(branch_commits) -> None:
     """Print one line per PR-branch commit under a merge commit's header.
 
@@ -312,6 +376,10 @@ def term(
         None, help="Show only events at/after this ref (short sha, tag, or commit_seq)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
+    commits: bool = typer.Option(
+        False, "--commits",
+        help="For classic-merge PRs with a PR title, also list the PR-branch commits.",
+    ),
 ):
     """Show a term's change history, or its reconstructed state at a point."""
     db = _open_source(source, config)
@@ -324,7 +392,7 @@ def term(
         since_seq = db.resolve_ref(since) if since is not None else None
         _render_timeline(
             term_id, header, changes,
-            limit=limit, since_seq=since_seq, full=full,
+            limit=limit, since_seq=since_seq, full=full, show_commits=commits,
         )
     db.close()
 
@@ -338,6 +406,10 @@ def commit(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
+    commits: bool = typer.Option(
+        False, "--commits",
+        help="For classic-merge PRs with a PR title, also list the PR-branch commits.",
+    ),
 ):
     """Show what changed at one commit, structurally rendered per term."""
     db = _open_source(source, config)
@@ -346,7 +418,7 @@ def commit(
         console.print(f"[yellow]No indexed changes for commit[/] {sha}")
         db.close()
         return
-    _render_commit_view(head, events, full=full)
+    _render_commit_view(head, events, full=full, show_commits=commits)
     db.close()
 
 
@@ -383,6 +455,10 @@ def diff(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
+    commits: bool = typer.Option(
+        False, "--commits",
+        help="For classic-merge PRs with a PR title, also list the PR-branch commits.",
+    ),
 ):
     """Show clause changes between two points, grouped by term and commit."""
     db = _open_source(source, config)
@@ -391,7 +467,7 @@ def diff(
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
         return
-    _render_diff_view(ref_a, ref_b, events, full=full)
+    _render_diff_view(ref_a, ref_b, events, full=full, show_commits=commits)
     db.close()
 
 
@@ -415,6 +491,10 @@ def search(
         False, "--ignore-case", "-i", help="Case-insensitive match."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
+    commits: bool = typer.Option(
+        False, "--commits",
+        help="For classic-merge PRs with a PR title, also list the PR-branch commits.",
+    ),
 ):
     """Find commits that added or removed a clause matching QUERY."""
     db = _open_source(source, config)
@@ -427,7 +507,10 @@ def search(
         console.print(f'[yellow]No events matching[/] "{query}"')
         db.close()
         return
-    _render_search_view(query, events, regex=regex, ignore_case=ignore_case, full=full)
+    _render_search_view(
+        query, events, regex=regex, ignore_case=ignore_case, full=full,
+        show_commits=commits,
+    )
     db.close()
 
 
@@ -457,6 +540,7 @@ def _render_timeline(
     limit: int | None = None,
     since_seq: int | None = None,
     full: bool = False,
+    show_commits: bool = False,
 ) -> None:
     if not changes:
         console.print(f"[yellow]No history for[/] {term_id}")
@@ -483,15 +567,7 @@ def _render_timeline(
         header_line.append(f"  {_date(head.committed_date)}  ")
         if head.author_name:
             header_line.append(f"{head.author_name}  ", style="cyan")
-        # Mondo commit messages end with `(#N)`, so a styled PR badge would
-        # duplicate what's already in the subject line. pr_number stays in
-        # the artifact for filtering; we just don't render it twice here.
-        header_line.append(head.message.splitlines()[0], style="dim")
-        console.print(header_line)
-        if head.pr_number is not None:
-            _print_pr_link(head.pr_number)
-        if head.branch_commits:
-            _print_branch_commits(head.branch_commits)
+        _render_commit_header(head, header_line, show_commits=show_commits)
         for op in render.pair_events(rows):
             console.print(render.render_op(op, truncate=cap))
 
@@ -552,7 +628,8 @@ def _render_header(
 
 
 def _render_commit_view(
-    head: Change, events: list[TermChange], full: bool = False
+    head: Change, events: list[TermChange], full: bool = False,
+    show_commits: bool = False,
 ) -> None:
     """Structural view of one commit: header + per-term event groups."""
     header_line = Text("● ")
@@ -560,12 +637,7 @@ def _render_commit_view(
     header_line.append(f"  {_date(head.committed_date)}  ")
     if head.author_name:
         header_line.append(f"{head.author_name}  ", style="cyan")
-    header_line.append(head.message.splitlines()[0], style="dim")
-    console.print(header_line)
-    if head.pr_number is not None:
-        _print_pr_link(head.pr_number)
-    if head.branch_commits:
-        _print_branch_commits(head.branch_commits)
+    _render_commit_header(head, header_line, show_commits=show_commits)
     n_terms = len({tc.term_id for tc in events})
     console.print(Text(f"{n_terms} terms changed", style="dim"))
 
@@ -583,7 +655,8 @@ def _render_commit_view(
 
 
 def _render_diff_view(
-    ref_a: str, ref_b: str, events: list[TermChange], full: bool = False
+    ref_a: str, ref_b: str, events: list[TermChange], full: bool = False,
+    show_commits: bool = False,
 ) -> None:
     """Structural view of a range diff: per-term sections, per-commit sub-groups."""
     n_terms = len({tc.term_id for tc in events})
@@ -596,7 +669,7 @@ def _render_diff_view(
     summary.append(f"{n_commits}", style="bold")
     summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
     console.print(summary)
-    _render_events_by_term_and_commit(events, full=full)
+    _render_events_by_term_and_commit(events, full=full, show_commits=show_commits)
 
 
 def _render_search_view(
@@ -605,6 +678,7 @@ def _render_search_view(
     regex: bool = False,
     ignore_case: bool = False,
     full: bool = False,
+    show_commits: bool = False,
 ) -> None:
     """Structural view of search hits: same layout as the diff view.
 
@@ -633,7 +707,7 @@ def _render_search_view(
     summary.append(f"{n_commits}", style="bold")
     summary.append(" commits", style="dim")
     console.print(summary)
-    _render_events_by_term_and_commit(events, full=full)
+    _render_events_by_term_and_commit(events, full=full, show_commits=show_commits)
 
 
 def _filter_events_by_delta_match(
@@ -668,7 +742,7 @@ def _filter_events_by_delta_match(
 
 
 def _render_events_by_term_and_commit(
-    events: list[TermChange], full: bool = False
+    events: list[TermChange], full: bool = False, show_commits: bool = False
 ) -> None:
     """Group ``events`` by term, then by commit within each term, and render.
 
@@ -696,12 +770,7 @@ def _render_events_by_term_and_commit(
             commit_header.append(f"  {_date(head.committed_date)}  ")
             if head.author_name:
                 commit_header.append(f"{head.author_name}  ", style="cyan")
-            commit_header.append(head.message.splitlines()[0], style="dim")
-            console.print(commit_header)
-            if head.pr_number is not None:
-                _print_pr_link(head.pr_number)
-            if head.branch_commits:
-                _print_branch_commits(head.branch_commits)
+            _render_commit_header(head, commit_header, show_commits=show_commits)
             changes = [tc.change for tc in commit_rows]
             for op in render.pair_events(changes):
                 console.print(render.render_op(op, truncate=cap))
