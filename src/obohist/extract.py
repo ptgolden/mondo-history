@@ -38,8 +38,26 @@ from .obo import (
 # commits, so peak memory stays bounded regardless of history length.
 _FLUSH_EVERY = 200
 
-_PR = re.compile(r"\(#(\d+)\)")
+# GitHub PR # in a commit message. Two common shapes:
+#   * squash-and-merge (post-2023 Mondo, most repos): "Title text (#1234)".
+#   * classic merge commit (pre-2023 Mondo, PATO):
+#     "Merge pull request #1234 from user/branch".
+# The classic pattern is very specific (near-zero false positive) so we check
+# it first; the parenthesized form can incidentally appear inside PR bodies
+# that quote other PRs.
+_PR_MERGE = re.compile(r"^Merge pull request #(\d+) from ")
+_PR_SQUASH = re.compile(r"\(#(\d+)\)")
 _EMPTY: tuple[Clause, ...] = ()
+
+
+def _extract_pr_number(message: str) -> int | None:
+    m = _PR_MERGE.match(message)
+    if m:
+        return int(m.group(1))
+    m = _PR_SQUASH.search(message)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def extract(
@@ -152,7 +170,6 @@ def _release_rows(
 
 
 def _commit_row(commit: CommitInfo) -> dict:
-    match = _PR.search(commit.message)
     return {
         "commit_seq": commit.seq,
         "sha": commit.sha,
@@ -160,7 +177,7 @@ def _commit_row(commit: CommitInfo) -> dict:
         "author_email": commit.author_email,
         "committed_date": commit.committed_date.astimezone(timezone.utc).replace(tzinfo=None),
         "message": commit.message,
-        "pr_number": int(match.group(1)) if match else None,
+        "pr_number": _extract_pr_number(commit.message),
         "parent_sha": commit.parent_sha,
         "branch_commits": [
             {

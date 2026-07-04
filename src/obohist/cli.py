@@ -1,5 +1,6 @@
 """Command-line interface for building and querying the history artifact."""
 
+import re
 from collections import Counter
 from itertools import groupby
 from pathlib import Path
@@ -16,16 +17,29 @@ from .extract import extract as run_extract
 from .gitsource import GitSource
 from .query import ArtifactNotFound, Change, HistoryDB, TermChange, TermHeader
 
-# TODO: derive the PR-link base URL from the source's repo config, threaded
-# through the render pipeline. For now, hardcoded to Mondo — this URL only
-# gets used for PR # → link decoration and Mondo is the only source we
-# actually work with here.
-PR_URL_BASE = "https://github.com/monarch-initiative/mondo/pull/"
+# Set at each query command's entry by ``_open_source`` from the resolved
+# source config. Query commands are single-threaded and run one at a time
+# per CLI invocation, so a module-level slot is safe here.
+_PR_URL_BASE: str | None = None
+
+# GitHub HTTPS URL, with or without a trailing ``.git``. Anything else
+# (SSH URLs, local paths, non-GitHub hosts) → no PR link.
+_GITHUB_HTTPS = re.compile(r"^https?://github\.com/([^/]+/[^/]+?)(?:\.git)?/?$")
+
+
+def _pr_url_base(repo: str) -> str | None:
+    m = _GITHUB_HTTPS.match(repo)
+    return f"https://github.com/{m.group(1)}/pull/" if m else None
 
 
 def _print_pr_link(pr_number: int) -> None:
-    """Print a dim-cyan clickable URL to the PR, one indented line."""
-    url = f"{PR_URL_BASE}{pr_number}"
+    """Print an indented line for the PR — clickable URL if the source is on
+    GitHub, otherwise the bare number so pre-2023 pattern still gets tagged
+    visibly even when there's no place to link to."""
+    if _PR_URL_BASE is None:
+        console.print(Text(f"    → PR #{pr_number}", style="dim"))
+        return
+    url = f"{_PR_URL_BASE}{pr_number}"
     line = Text("    → ", style="dim")
     line.append(url, style=f"link {url} dim cyan")
     console.print(line)
@@ -71,8 +85,15 @@ def _resolve_source(source: str, config: Optional[Path]) -> SourceConfig:
 
 
 def _open_source(source: str, config: Optional[Path]) -> HistoryDB:
-    """Combine config lookup and DB open into one call for query commands."""
-    return _open(_resolve_source(source, config).db_dir)
+    """Combine config lookup and DB open into one call for query commands.
+
+    Also stashes the source's derived PR URL base globally so ``_print_pr_link``
+    can produce clickable URLs matching this specific source.
+    """
+    src = _resolve_source(source, config)
+    global _PR_URL_BASE
+    _PR_URL_BASE = _pr_url_base(src.repo)
+    return _open(src.db_dir)
 
 
 source_app = typer.Typer(add_completion=False, help="Manage configured ontology sources.")

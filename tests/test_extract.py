@@ -144,6 +144,25 @@ def test_pr_number_parsed_from_message(artifact: Path):
     assert pr == 42
 
 
+def test_pr_number_handles_both_github_conventions():
+    from obohist.extract import _extract_pr_number
+
+    # Squash-and-merge (post-2023 Mondo): title ends with "(#N)".
+    assert _extract_pr_number("add venom terms (#10409)") == 10409
+    # Classic merge commit (pre-2023 Mondo, PATO): "Merge pull request #N …"
+    # The merge pattern must anchor to start-of-message so a PR body that
+    # mentions "Merge pull request #x" in prose doesn't false-positive.
+    assert _extract_pr_number(
+        "Merge pull request #5013 from monarch-initiative/issue-4938"
+    ) == 5013
+    # No PR referenced.
+    assert _extract_pr_number("misc fixes") is None
+    # Body that quotes another PR in parens shouldn't win over the merge header.
+    assert _extract_pr_number(
+        "Merge pull request #123 from user/branch\n\nRelates to (#456)"
+    ) == 123
+
+
 def test_releases_map_tag_to_commit(artifact: Path):
     db = HistoryDB(artifact)
     rels = db.releases()
