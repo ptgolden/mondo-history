@@ -95,7 +95,7 @@ class HistoryDB:
         if absent:
             raise ArtifactNotFound(
                 f"No history artifact at '{self.dir}' (missing: {', '.join(absent)}). "
-                "Run `obohist build` first, or pass --artifact <dir>."
+                "Run `obohog build` first, or pass --artifact <dir>."
             )
         self.con = duckdb.connect(":memory:")
         for name in ("commits", "term_snapshots", "events", "releases", "skipped"):
@@ -205,7 +205,7 @@ class HistoryDB:
         empty placeholders — the CLI uses it purely for the ``sha/date/PR/message``
         header). ``events`` is ordered by ``(term_id, operation, predicate, value)``
         so ``groupby(events, key=term_id)`` gives per-term event lists directly
-        consumable by :func:`obohist.render.pair_events`. Optionally
+        consumable by :func:`obohog.render.pair_events`. Optionally
         restricted to term IDs with a given CURIE prefix via ``namespace``.
 
         Returns ``(None, [])`` when no commit matches the sha prefix.

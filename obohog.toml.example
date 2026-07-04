@@ -1,6 +1,6 @@
-# obohist configuration.
+# obohog configuration.
 #
-# Copy this to `obohist.toml` and adjust to declare the OBO ontologies you
+# Copy this to `obohog.toml` and adjust to declare the OBO ontologies you
 # want to track. Any git-hosted OBO file is fair game.
 
 # Root directory for local clones and databases. Optional (defaults to ./data).

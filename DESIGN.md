@@ -1,4 +1,4 @@
-# obohist — Design
+# obohog — Design
 
 *A concrete design for the vision in [`PLAN.md`](./PLAN.md).*
 
@@ -11,7 +11,7 @@ classification evolve?") without cloning the source repository or doing
 GitHub archaeology. The vision doc leaves the implementation unspecified.
 This document commits to concrete choices.
 
-`obohist` builds its *own* clones of each configured ontology's repository —
+`obohog` builds its *own* clones of each configured ontology's repository —
 scoped to a single OBO file's history per source (see §3) — as a build-time
 input. Each ontology's database is entirely *derived from* the source's git
 history (a single OBO file, e.g. Mondo's `src/ontology/mondo-edit.obo` or
@@ -21,7 +21,7 @@ to the source repo at all. The build depends on that history; consumers do
 not. Each database versions and releases on its own cadence.
 
 Chosen stack:
-- **TOML** (via stdlib `tomllib`) for the per-project `obohist.toml` config
+- **TOML** (via stdlib `tomllib`) for the per-project `obohog.toml` config
   declaring one or more sources.
 - **fastobo** (Python bindings) for OBO parsing.
 - **Parquet + DuckDB** for storage and query.
@@ -70,7 +70,7 @@ Chosen stack:
   `git cat-file` **only that one file's blobs** across history. So we only
   ever download the history of the declared OBO file, not the rest of the
   repo. Reproducible from a URL.
-- The source URL and file path come from `obohist.toml` and are recorded in
+- The source URL and file path come from `obohog.toml` and are recorded in
   the built `build_meta`.
 
 ---
@@ -132,7 +132,7 @@ their own invariants and raise on violation. Avoid speculative edge-case handlin
 
 ## Interfaces (all thin DuckDB SQL over the same Parquet)
 
-CLI (`obohist`):
+CLI (`obohog`):
 - `term MONDO:x` — event timeline for a term.
 - `term MONDO:x --at <sha|date|release>` — reconstructed snapshot at that point.
 - `synonyms|xrefs|parents MONDO:x` — filtered event history for one field kind.
@@ -142,7 +142,7 @@ CLI (`obohist`):
 
 ### Commit-header rendering: GitHub-specific heuristics with a graceful fallback
 
-`obohist term`, `commit`, `diff`, and `search` all render a per-commit header
+`obohog term`, `commit`, `diff`, and `search` all render a per-commit header
 block: `sha  date  author  <subject line>`, followed optionally by a PR link
 and/or PR-branch commits. Two GitHub conventions inform how that subject line
 is chosen; both are heuristics rather than schema, and both degrade cleanly
@@ -202,10 +202,10 @@ HTTP via DuckDB httpfs), no independent representation.
 DESIGN.md                     # this document
 PLAN.md                       # original vision
 README.md                     # quick start
-obohist.toml.example          # example config; user copies to obohist.toml
+obohog.toml.example          # example config; user copies to obohog.toml
 pyproject.toml                # deps: fastobo, duckdb, pyarrow, typer, rich, tqdm
-src/obohist/
-  config.py                   # obohist.toml loading + Source resolution
+src/obohog/
+  config.py                   # obohog.toml loading + Source resolution
   extract.py                  # git walk + fastobo parse + diff → Parquet
   gitsource.py                # blobless clone / repo acquisition, log --follow
   obo.py                      # frame normalization, canonical clause set, hashing
@@ -249,7 +249,7 @@ data/                         # gitignored per-source working state
 ## Implementation status (2026-07-03)
 
 **Working:**
-- `config` — TOML-based `obohist.toml` declaring one or more ontology sources.
+- `config` — TOML-based `obohog.toml` declaring one or more ontology sources.
   Each source pins a git repo, the OBO file within it, and optionally clone/db
   paths. Default layout is `{storage}/{name}/{clone,db}`.
 - CLI is source-aware. All query commands (`term`, `commit`, `pr`, `diff`,
@@ -312,7 +312,7 @@ data/                         # gitignored per-source working state
   (7,487 versions), ~925 MB single pack, gitignored. The full build runs
   **offline** against it (`GIT_NO_LAZY_FETCH=1`).
 - `./data/mondo/db/` — the built history database from that clone. The
-  `obohist term --source mondo MONDO:0012350` examples in `README.md` read
+  `obohog term --source mondo MONDO:0012350` examples in `README.md` read
   from it. ~656 MB of parquet.
 
 **Validated:** parallel build produces byte-identical events/snapshots to the

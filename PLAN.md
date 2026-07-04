@@ -1,4 +1,4 @@
-# obohist — Original Vision
+# obohog — Original Vision
 
 *A queryable history of OBO ontology evolution.*
 
@@ -31,7 +31,7 @@ Instead, developers must resort to the GitHub web interface, manually search com
 
 This is particularly unfortunate because many ontology debugging and maintenance tasks are fundamentally historical. Understanding the current state of the ontology frequently requires understanding how that state was reached.
 
-`obohist` addresses this by treating complete Git history as a build-time dependency rather than a user dependency.
+`obohog` addresses this by treating complete Git history as a build-time dependency rather than a user dependency.
 
 A history extraction process runs once per source, against a complete repository clone, and produces a compact, queryable database describing the evolution of one OBO file (e.g. `mondo-edit.obo`, `go-edit.obo`, `pato-edit.obo`). Developers query these databases directly rather than traversing repository history.
 
@@ -67,7 +67,7 @@ Rather than asking "Which commit changed this file?", users should be able to as
 
 # Non-Goals
 
-`obohist` is **not** intended to:
+`obohog` is **not** intended to:
 
 * replace Git
 * replace repository history
@@ -129,7 +129,7 @@ Only the extraction process needs Git access — and even then not a full clone
 of the whole repository. It builds a **blob-filtered clone**
 (`git clone --filter=blob:none`: commit graph and trees, no file contents) and
 then fetches only the historical contents of the single edited OBO file (as
-declared per source in `obohist.toml`) via a **scoped, delta-packed**
+declared per source in `obohog.toml`) via a **scoped, delta-packed**
 `git backfill --sparse` (with the sparse-checkout set to just that file). So
 extraction downloads the history of one file and nothing else, in a handful
 of batched requests rather than one fetch per version.
@@ -286,12 +286,12 @@ The web application should expose the same information available through the dow
 
 # Future Directions
 
-`obohist` is now source-agnostic in its architecture: `obohist.toml` declares any number of OBO sources, each with its own repo + file. Any version-controlled `.obo` file works today.
+`obohog` is now source-agnostic in its architecture: `obohog.toml` declares any number of OBO sources, each with its own repo + file. Any version-controlled `.obo` file works today.
 
 Longer term:
 
 * **Other OBO serializations** — OWL Functional Notation, RDF/XML, Turtle, JSON-LD. The current diff-scoped extraction depends on OBO's line-oriented `[Term]` stanzas; other formats would need format-specific stanza-equivalent parsers. See DESIGN.md's next-steps for details.
-* **Prefix migrations across renames** — for ontologies that changed CURIE prefix at some point (e.g. Mondo's `TBD:X` → `MONDO:X` in 2017), declare the mapping in the source's config so `obohist term MONDO:0000450` transparently includes the pre-rename history. Design in `2026-07-03-note.term-identity-across-renames.md`.
+* **Prefix migrations across renames** — for ontologies that changed CURIE prefix at some point (e.g. Mondo's `TBD:X` → `MONDO:X` in 2017), declare the mapping in the source's config so `obohog term MONDO:0000450` transparently includes the pre-rename history. Design in `2026-07-03-note.term-identity-across-renames.md`.
 * **Incremental artifact updates** — top of the queue. Right now `source sync` re-clones and rebuilds fully; the plan is to append new part-files instead.
 
 ---
@@ -327,7 +327,7 @@ workflows rather than implementation convenience.
 
 # Vision
 
-`obohist` aims to make an OBO ontology's history as easy to explore as the ontology itself.
+`obohog` aims to make an OBO ontology's history as easy to explore as the ontology itself.
 
 Instead of manually traversing commits, GitHub history, and pull requests, developers should be able to ask historical questions directly and receive answers in terms of ontology concepts.
 

@@ -108,7 +108,7 @@ wheels = [
 ]
 
 [[package]]
-name = "obohist"
+name = "obohog"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

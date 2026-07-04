@@ -9,8 +9,8 @@ that information.
 
 import re
 
-from obohist.query import Change
-from obohist.render import (
+from obohog.query import Change
+from obohog.render import (
     DEFAULT_TRUNCATE,
     edit_delta_matches,
     Add,
@@ -459,7 +459,7 @@ def test_edit_delta_matches_body_change_returns_true():
 
 
 def test_edit_delta_matches_kept_token_inside_edited_body_returns_false():
-    # Real case from `obohist search C317`: a synonym's evidence list
+    # Real case from `obohog search C317`: a synonym's evidence list
     # had CSP2005:2004-1700 removed. NCIT:C3174 stayed put but happens to
     # contain the substring "C317". The commit didn't actually change
     # anything involving C317 — that xref reference was unchanged context

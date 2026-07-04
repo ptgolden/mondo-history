@@ -49,7 +49,7 @@ def _print_pr_link(pr_number: int) -> None:
 # (whatever the PR was named on GitHub — usually the branch's last commit
 # subject, or a manual title set on the merge screen). We use that title as
 # the primary editorial line, demote the boilerplate to a dim sub-line, and
-# hide branch commits by default (drill in via `obohist pr <N>` if needed).
+# hide branch commits by default (drill in via `obohog pr <N>` if needed).
 _MERGE_BOILERPLATE = re.compile(r"^Merge pull request #(\d+) from ")
 
 
@@ -166,7 +166,7 @@ app.add_typer(source_app, name="source")
 
 @source_app.command("list")
 def source_list(
-    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
 ):
     """Show configured sources with build status and disk usage."""
     try:
@@ -254,8 +254,8 @@ def _fmt_size(nbytes: int) -> str:
 
 @source_app.command("sync")
 def source_sync(
-    name: str = typer.Argument(..., help="Source name (as declared in obohist.toml)."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+    name: str = typer.Argument(..., help="Source name (as declared in obohog.toml)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     since: Optional[str] = typer.Option(
         None, help="Only index history at/after this git date, e.g. 2026-06-01."
     ),
@@ -319,7 +319,7 @@ def _ensure_source_clone(source: SourceConfig, since: Optional[str]) -> str:
     # Server-side backfill packs are transfer-optimized, not size-optimized —
     # a client-side repack often shrinks them ~5×. Nudge, don't force.
     console.print(
-        f"[dim]Tip: [cyan]obohist source repack {source.name}[/] to reclaim "
+        f"[dim]Tip: [cyan]obohog source repack {source.name}[/] to reclaim "
         "disk space on the clone.[/]"
     )
     return str(source.clone_dir)
@@ -327,8 +327,8 @@ def _ensure_source_clone(source: SourceConfig, since: Optional[str]) -> str:
 
 @source_app.command("repack")
 def source_repack(
-    name: str = typer.Argument(..., help="Source name (as declared in obohist.toml)."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+    name: str = typer.Argument(..., help="Source name (as declared in obohog.toml)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     window_memory: str = typer.Option(
         "1g",
         "--window-memory",
@@ -348,7 +348,7 @@ def source_repack(
     """
     source = _resolve_source(name, config)
     if not source.clone_dir.exists():
-        console.print(f"[red]No clone at {source.clone_dir}. Run `obohist source sync {name}` first.[/]")
+        console.print(f"[red]No clone at {source.clone_dir}. Run `obohog source sync {name}` first.[/]")
         raise typer.Exit(1)
     before = _dir_size(source.clone_dir / ".git")
     console.print(f"Repacking [cyan]{source.clone_dir}[/] …")
@@ -363,8 +363,8 @@ def source_repack(
 @app.command()
 def term(
     term_id: str = typer.Argument(..., help="e.g. MONDO:0007739"),
-    source: str = typer.Option(..., "--source", help="Configured source name (see obohist source list)."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml (default: ./obohist.toml)."),
+    source: str = typer.Option(..., "--source", help="Configured source name (see obohog source list)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml (default: ./obohog.toml)."),
     only: Optional[str] = typer.Option(None, help="Restrict to one clause kind, e.g. synonym."),
     at: Optional[str] = typer.Option(
         None, help="Reconstruct state as of this ref (short sha, tag, or commit_seq)."
@@ -401,7 +401,7 @@ def term(
 def commit(
     sha: str = typer.Argument(..., help="Commit sha or unique prefix."),
     source: str = typer.Option(..., "--source", help="Configured source name."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     namespace: Optional[str] = typer.Option(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
@@ -426,7 +426,7 @@ def commit(
 def pr(
     number: int = typer.Argument(..., help="Pull request number, e.g. 10343."),
     source: str = typer.Option(..., "--source", help="Configured source name."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
 ):
     """List the terms changed by a pull request."""
     db = _open_source(source, config)
@@ -449,7 +449,7 @@ def diff(
     ref_a: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
     ref_b: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
     source: str = typer.Option(..., "--source", help="Configured source name."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
     namespace: Optional[str] = typer.Option(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
@@ -475,7 +475,7 @@ def diff(
 def search(
     query: str = typer.Argument(..., help="Substring (or regex, with --regex) to match in event values."),
     source: str = typer.Option(..., "--source", help="Configured source name."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
     predicate: Optional[str] = typer.Option(
         None, help="Restrict to one clause kind, e.g. xref."
@@ -517,7 +517,7 @@ def search(
 @app.command()
 def releases(
     source: str = typer.Option(..., "--source", help="Configured source name."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
 ):
     """List release tags indexed for a source."""
     db = _open_source(source, config)
@@ -689,7 +689,7 @@ def _render_search_view(
     "the change" by definition, so the SQL match already tells us the query
     is in the changed portion.
 
-    See :func:`obohist.render.edit_delta_matches` for the exact rule.
+    See :func:`obohog.render.edit_delta_matches` for the exact rule.
     """
     events = _filter_events_by_delta_match(events, query, regex, ignore_case)
     if not events:
@@ -716,7 +716,7 @@ def _filter_events_by_delta_match(
     """Drop paired-edit event pairs whose delta doesn't contain the query.
 
     Pairs events per commit, drops both halves of any ``Edit`` whose
-    :func:`~obohist.render.edit_delta_matches` returns False, and
+    :func:`~obohog.render.edit_delta_matches` returns False, and
     keeps every unpaired ``Add`` / ``Remove`` as-is. Preserves the input
     order at the (term_id, commit_seq) granularity so the downstream
     ``groupby`` in :func:`_render_events_by_term_and_commit` still sees

@@ -1,10 +1,10 @@
-"""Tests for obohist.toml loading and source resolution."""
+"""Tests for obohog.toml loading and source resolution."""
 
 from pathlib import Path
 
 import pytest
 
-from obohist.config import Config, ConfigError, SourceConfig, load_config
+from obohog.config import Config, ConfigError, SourceConfig, load_config
 
 
 def _write(path: Path, body: str) -> Path:
@@ -14,7 +14,7 @@ def _write(path: Path, body: str) -> Path:
 
 def test_load_config_minimal(tmp_path: Path):
     cfg_path = _write(
-        tmp_path / "obohist.toml",
+        tmp_path / "obohog.toml",
         """
         [source.mondo]
         repo = "https://github.com/monarch-initiative/mondo"
@@ -36,9 +36,9 @@ def test_load_config_minimal(tmp_path: Path):
 
 def test_load_config_explicit_storage_and_paths(tmp_path: Path):
     cfg_path = _write(
-        tmp_path / "obohist.toml",
+        tmp_path / "obohog.toml",
         """
-        storage = "/tmp/obohist-data"
+        storage = "/tmp/obohog-data"
 
         [source.pato]
         repo = "https://github.com/pato-ontology/pato"
@@ -48,7 +48,7 @@ def test_load_config_explicit_storage_and_paths(tmp_path: Path):
         """,
     )
     cfg = load_config(cfg_path)
-    assert cfg.storage == Path("/tmp/obohist-data")
+    assert cfg.storage == Path("/tmp/obohog-data")
     pato = cfg.sources["pato"]
     assert pato.clone_dir == Path("/big/disk/pato/clone")
     assert pato.db_dir == Path("/big/disk/pato/db")
@@ -56,7 +56,7 @@ def test_load_config_explicit_storage_and_paths(tmp_path: Path):
 
 def test_load_config_multiple_sources(tmp_path: Path):
     cfg_path = _write(
-        tmp_path / "obohist.toml",
+        tmp_path / "obohog.toml",
         """
         [source.mondo]
         repo = "https://github.com/monarch-initiative/mondo"
@@ -72,19 +72,19 @@ def test_load_config_multiple_sources(tmp_path: Path):
 
 
 def test_load_config_missing_file(tmp_path: Path):
-    with pytest.raises(ConfigError, match="No obohist config found"):
+    with pytest.raises(ConfigError, match="No obohog config found"):
         load_config(tmp_path / "does-not-exist.toml")
 
 
 def test_load_config_malformed_toml(tmp_path: Path):
-    cfg_path = _write(tmp_path / "obohist.toml", "[source.mondo\nunterminated")
+    cfg_path = _write(tmp_path / "obohog.toml", "[source.mondo\nunterminated")
     with pytest.raises(ConfigError, match="Malformed TOML"):
         load_config(cfg_path)
 
 
 def test_load_config_missing_required_field(tmp_path: Path):
     cfg_path = _write(
-        tmp_path / "obohist.toml",
+        tmp_path / "obohog.toml",
         """
         [source.mondo]
         repo = "https://example/mondo"
@@ -96,7 +96,7 @@ def test_load_config_missing_required_field(tmp_path: Path):
 
 def test_get_source_unknown_lists_available(tmp_path: Path):
     cfg_path = _write(
-        tmp_path / "obohist.toml",
+        tmp_path / "obohog.toml",
         """
         [source.mondo]
         repo = "https://example/mondo"
@@ -113,7 +113,7 @@ def test_get_source_unknown_lists_available(tmp_path: Path):
 
 
 def test_get_source_empty_config_error_message(tmp_path: Path):
-    cfg_path = _write(tmp_path / "obohist.toml", "")
+    cfg_path = _write(tmp_path / "obohog.toml", "")
     cfg = load_config(cfg_path)
     with pytest.raises(ConfigError, match=r"Available sources: \(none\)"):
         cfg.get_source("mondo")

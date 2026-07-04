@@ -1,12 +1,12 @@
-"""Configuration for obohist: which OBO ontologies to track, and where.
+"""Configuration for obohog: which OBO ontologies to track, and where.
 
-An ``obohist.toml`` file at the project root declares one or more ontology
+An ``obohog.toml`` file at the project root declares one or more ontology
 *sources*. Each source pins a git repo, the OBO file within it, and (later)
 per-source options. The `--config <path>` CLI flag overrides the default
-lookup; otherwise we read ``./obohist.toml`` from the current working
+lookup; otherwise we read ``./obohog.toml`` from the current working
 directory. There is no global / XDG search yet.
 
-Example (also shipped as ``obohist.toml.example``)::
+Example (also shipped as ``obohog.toml.example``)::
 
     storage = "./data"
 
@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-DEFAULT_CONFIG_NAME = "obohist.toml"
+DEFAULT_CONFIG_NAME = "obohog.toml"
 DEFAULT_STORAGE_DIR = Path("./data")
 
 
@@ -49,7 +49,7 @@ class SourceConfig:
 
 @dataclass(frozen=True)
 class Config:
-    """The parsed obohist.toml — top-level storage root plus a source table."""
+    """The parsed obohog.toml — top-level storage root plus a source table."""
 
     path: Path  # the config file this was loaded from
     storage: Path
@@ -68,10 +68,10 @@ class Config:
 
 
 def load_config(path: Path | None = None) -> Config:
-    """Load and validate an obohist config file.
+    """Load and validate an obohog config file.
 
     ``path`` may be an explicit path (from ``--config``), or ``None`` — in
-    which case we look for ``obohist.toml`` in the current working directory.
+    which case we look for ``obohog.toml`` in the current working directory.
     Raises :class:`ConfigError` with a helpful message on any failure.
     """
     resolved = _resolve_config_path(path)
@@ -79,8 +79,8 @@ def load_config(path: Path | None = None) -> Config:
         data = tomllib.loads(resolved.read_text())
     except FileNotFoundError:
         raise ConfigError(
-            f"No obohist config found at {resolved}. "
-            f"Create one (see obohist.toml.example) or pass --config <path>."
+            f"No obohog config found at {resolved}. "
+            f"Create one (see obohog.toml.example) or pass --config <path>."
         )
     except tomllib.TOMLDecodeError as err:
         raise ConfigError(f"Malformed TOML at {resolved}: {err}")
