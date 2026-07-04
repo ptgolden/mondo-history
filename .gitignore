@@ -4,11 +4,17 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# Build inputs & outputs (never commit clones or generated artifacts)
-/mondo-clone/
-/artifact/
+# Build inputs & outputs (never commit clones or generated databases)
+/data/
 *.parquet
 *.duckdb
 
+# Local scratch notes (not meant to be shared)
+NOTES.md
+/2026-*-note.*.md
+
 # Editor / OS
 .DS_Store
+*.swp
+*.swo
+*~

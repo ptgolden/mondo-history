@@ -22,6 +22,17 @@ class Operation(enum.StrEnum):
 
 _CLAUSE = pa.struct([("predicate", pa.string()), ("value", pa.string())])
 
+# For merge commits (typically GitHub PR merges), the sequence of commits on
+# the merged branch that landed as part of this merge. Each entry is
+# (sha, author_name, committed_date, message) for one branch commit. Empty
+# for non-merge commits. Newest-first, matching what a user sees on GitHub.
+_BRANCH_COMMIT = pa.struct([
+    ("sha", pa.string()),
+    ("author_name", pa.string()),
+    ("committed_date", pa.timestamp("us")),
+    ("message", pa.string()),
+])
+
 COMMITS = pa.schema(
     [
         ("commit_seq", pa.int32()),
@@ -32,6 +43,7 @@ COMMITS = pa.schema(
         ("message", pa.string()),
         ("pr_number", pa.int32()),  # nullable
         ("parent_sha", pa.string()),  # nullable
+        ("branch_commits", pa.list_(_BRANCH_COMMIT)),
     ]
 )
 

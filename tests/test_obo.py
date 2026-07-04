@@ -1,6 +1,6 @@
 """Tests for OBO normalization, hashing, and clause diffing."""
 
-from mondo_history.obo import (
+from obohog.obo import (
     clause_delta,
     hash_clauses,
     parse_stanzas,

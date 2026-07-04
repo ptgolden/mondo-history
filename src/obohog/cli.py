@@ -1,5 +1,6 @@
 """Command-line interface for building and querying the history artifact."""
 
+import re
 from collections import Counter
 from itertools import groupby
 from pathlib import Path
@@ -10,29 +11,121 @@ from rich.console import Console
 from rich.text import Text
 
 from . import render
+from .config import Config, ConfigError, SourceConfig, load_config
 from .extract import build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
 from .query import ArtifactNotFound, Change, HistoryDB, TermChange, TermHeader
 
-DEFAULT_PATH = "src/ontology/mondo-edit.obo"
-DEFAULT_ARTIFACT = Path("artifact")
-DEFAULT_URL = "https://github.com/monarch-initiative/mondo.git"
-DEFAULT_CLONE = Path("mondo-clone")
-# TODO: when build_meta learns to record the source URL, derive this from it
-# instead of hardcoding. For now this is fine because the artifact has only
-# ever been built against monarch-initiative/mondo.
-PR_URL_BASE = "https://github.com/monarch-initiative/mondo/pull/"
+# Set at each query command's entry by ``_open_source`` from the resolved
+# source config. Query commands are single-threaded and run one at a time
+# per CLI invocation, so a module-level slot is safe here.
+_PR_URL_BASE: str | None = None
+
+# GitHub HTTPS URL, with or without a trailing ``.git``. Anything else
+# (SSH URLs, local paths, non-GitHub hosts) → no PR link.
+_GITHUB_HTTPS = re.compile(r"^https?://github\.com/([^/]+/[^/]+?)(?:\.git)?/?$")
+
+
+def _pr_url_base(repo: str) -> str | None:
+    m = _GITHUB_HTTPS.match(repo)
+    return f"https://github.com/{m.group(1)}/pull/" if m else None
 
 
 def _print_pr_link(pr_number: int) -> None:
-    """Print a dim-cyan clickable URL to the PR, one indented line."""
-    url = f"{PR_URL_BASE}{pr_number}"
+    """Print an indented line for the PR — clickable URL if the source is on
+    GitHub, otherwise the bare number so pre-2023 pattern still gets tagged
+    visibly even when there's no place to link to."""
+    if _PR_URL_BASE is None:
+        console.print(Text(f"    → PR #{pr_number}", style="dim"))
+        return
+    url = f"{_PR_URL_BASE}{pr_number}"
     line = Text("    → ", style="dim")
     line.append(url, style=f"link {url} dim cyan")
     console.print(line)
 
-app = typer.Typer(add_completion=False, help="Build and query the Mondo history index.")
+
+# Classic GitHub merge commit: line 1 is boilerplate, line 3+ is the PR title
+# (whatever the PR was named on GitHub — usually the branch's last commit
+# subject, or a manual title set on the merge screen). We use that title as
+# the primary editorial line, demote the boilerplate to a dim sub-line, and
+# hide branch commits by default (drill in via `obohog pr <N>` if needed).
+_MERGE_BOILERPLATE = re.compile(r"^Merge pull request #(\d+) from ")
+
+
+def _pr_title_from_merge(message: str) -> str | None:
+    """Return the PR title embedded in a classic GitHub merge commit body.
+
+    GitHub-specific heuristic: when line 1 matches ``Merge pull request #N
+    from …``, GitHub's default merge screen puts the PR title in the body
+    (line 3+). Returns the first non-empty body line, or None if the
+    message isn't a classic merge or has no body content. For non-GitHub
+    sources (or GitHub merges with empty bodies) callers should fall back
+    to rendering the raw subject line.
+    """
+    lines = message.splitlines()
+    if not lines or not _MERGE_BOILERPLATE.match(lines[0]):
+        return None
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _render_commit_header(head, prefix: Text, show_commits: bool = False) -> None:
+    """Given an already-built ``sha  date  author  `` prefix Text, append the
+    editorial subject line and print, followed by any demoted boilerplate,
+    PR link, and branch commits.
+
+    Classic GitHub merge commits with a PR title in the body:
+      * primary line: the PR title (editorial)
+      * next line: the boilerplate ``Merge pull request #N from …`` demoted
+        to dim italic
+      * branch commits: hidden unless ``show_commits=True``
+
+    Everything else (squash-and-merge, non-GitHub, or classic merge with
+    empty body):
+      * primary line: the raw subject
+      * branch commits: shown when present (only editorial signal for
+        old-style merges with empty bodies)
+    """
+    pr_title = _pr_title_from_merge(head.message)
+    subject = head.message.splitlines()[0] if head.message else ""
+    if pr_title is not None:
+        prefix.append(pr_title, style="dim")
+        console.print(prefix)
+        console.print(Text("      " + subject, style="dim italic"))
+        if head.pr_number is not None:
+            _print_pr_link(head.pr_number)
+        if show_commits and head.branch_commits:
+            _print_branch_commits(head.branch_commits)
+    else:
+        prefix.append(subject, style="dim")
+        console.print(prefix)
+        if head.pr_number is not None:
+            _print_pr_link(head.pr_number)
+        if head.branch_commits:
+            _print_branch_commits(head.branch_commits)
+
+
+def _print_branch_commits(branch_commits) -> None:
+    """Print one line per PR-branch commit under a merge commit's header.
+
+    Newest first (matching what a reader sees on GitHub); short sha + subject
+    line only. For a typical PR-branch this is 1–3 lines that give the real
+    editorial intent, since the mainline header just says
+    "Merge pull request #N from ...".
+    """
+    for bc in branch_commits:
+        line = Text("    ⤷ ", style="dim")
+        line.append(bc.sha[:7], style="yellow")
+        line.append("  ", style="dim")
+        subject = bc.message.splitlines()[0] if bc.message else ""
+        line.append(subject, style="dim")
+        console.print(line)
+
+app = typer.Typer(add_completion=False, help="Build and query an OBO ontology history index.")
 console = Console()
 
 
@@ -45,40 +138,149 @@ def _open(artifact: Path) -> HistoryDB:
         raise typer.Exit(1)
 
 
-@app.command()
-def build(
-    out: Path = typer.Option(DEFAULT_ARTIFACT, help="Output artifact directory."),
-    url: str = typer.Option(DEFAULT_URL, help="Mondo repo to clone (blob-filtered)."),
+def _resolve_source(source: str, config: Optional[Path]) -> SourceConfig:
+    """Load the config file and look up the requested source; exit on error."""
+    try:
+        cfg = load_config(config)
+        return cfg.get_source(source)
+    except ConfigError as err:
+        console.print(f"[red]{err}[/]")
+        raise typer.Exit(1)
+
+
+def _open_source(source: str, config: Optional[Path]) -> HistoryDB:
+    """Combine config lookup and DB open into one call for query commands.
+
+    Also stashes the source's derived PR URL base globally so ``_print_pr_link``
+    can produce clickable URLs matching this specific source.
+    """
+    src = _resolve_source(source, config)
+    global _PR_URL_BASE
+    _PR_URL_BASE = _pr_url_base(src.repo)
+    return _open(src.db_dir)
+
+
+source_app = typer.Typer(add_completion=False, help="Manage configured ontology sources.")
+app.add_typer(source_app, name="source")
+
+
+@source_app.command("list")
+def source_list(
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
+):
+    """Show configured sources with build status and disk usage."""
+    try:
+        cfg = load_config(config)
+    except ConfigError as err:
+        console.print(f"[red]{err}[/]")
+        raise typer.Exit(1)
+    console.print(f"[dim]Config:[/]  {cfg.path}")
+    console.print(f"[dim]Storage:[/] {cfg.storage}")
+    if not cfg.sources:
+        console.print("\n[yellow]No sources configured.[/]")
+        return
+    from rich.table import Table
+
+    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    table.add_column("name", style="bold cyan", no_wrap=True)
+    table.add_column("repo", style="dim", overflow="fold")
+    table.add_column("file", style="dim", overflow="fold")
+    table.add_column("status", style="dim", no_wrap=True)
+    table.add_column("commits", style="dim", no_wrap=True, justify="right")
+    table.add_column("clone", style="dim", no_wrap=True, justify="right")
+    table.add_column("db", style="dim", no_wrap=True, justify="right")
+    for name, source in cfg.sources.items():
+        status, commits = _source_status(source)
+        clone = _fmt_size(_dir_size(source.clone_dir))
+        db = _fmt_size(_dir_size(source.db_dir))
+        table.add_row(
+            name, _short_repo(source.repo), source.file,
+            status, commits, clone, db,
+        )
+    console.print()
+    console.print(table)
+
+
+def _short_repo(repo: str) -> str:
+    """`https://github.com/owner/name(.git)?` → `owner/name`; other URLs pass through."""
+    trimmed = repo.rstrip("/")
+    if trimmed.endswith(".git"):
+        trimmed = trimmed[: -len(".git")]
+    parts = trimmed.split("/")
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return repo
+
+
+def _source_status(source: SourceConfig) -> tuple[str, str]:
+    """Best-effort status label + commit count for a configured source."""
+    if not source.db_dir.exists():
+        return "not built", "—"
+    try:
+        db = HistoryDB(source.db_dir)
+    except ArtifactNotFound:
+        return "not built", "—"
+    row = db.con.execute("SELECT COUNT(*) FROM commits").fetchone()
+    db.close()
+    return "built", f"{row[0]:,}" if row else "—"
+
+
+def _dir_size(path: Path) -> int:
+    """Total bytes on disk for everything under path, or 0 if it doesn't exist."""
+    if not path.exists():
+        return 0
+    total = 0
+    for entry in path.rglob("*"):
+        if entry.is_file():
+            try:
+                total += entry.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _fmt_size(nbytes: int) -> str:
+    """Human-readable size, one decimal place."""
+    if nbytes == 0:
+        return "—"
+    units = ["B", "K", "M", "G", "T"]
+    size = float(nbytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}B"
+        size /= 1024
+    return f"{size:.1f}{units[-1]}"
+
+
+@source_app.command("sync")
+def source_sync(
+    name: str = typer.Argument(..., help="Source name (as declared in obohog.toml)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     since: Optional[str] = typer.Option(
         None, help="Only index history at/after this git date, e.g. 2026-06-01."
     ),
-    clone_dir: Path = typer.Option(DEFAULT_CLONE, help="Where the blob-filtered clone lives."),
-    repo: Optional[str] = typer.Option(
-        None, help="Use an existing local clone instead of cloning --url."
-    ),
-    path: str = typer.Option(DEFAULT_PATH, help="File whose history to index."),
     limit: Optional[int] = typer.Option(None, help="Index only the most recent N versions."),
     jobs: int = typer.Option(
         0, help="Parser processes: 0 = auto (cores-2), 1 = single-threaded, N = that many."
     ),
     chunk_size: int = typer.Option(
-        0, help="Commits per chunk (0 = auto, ~4 chunks/worker). Smaller = better "
-        "load balancing but more per-chunk seed-parse overhead."
+        0, help="Commits per chunk (0 = auto, ~4 chunks/worker)."
     ),
     progress: bool = typer.Option(True, help="Show a per-commit progress bar (parallel builds)."),
 ):
-    """Extract history into a Parquet artifact, cloning Mondo if needed."""
-    clone_path = _ensure_clone(url, since, clone_dir, repo)
+    """Clone (or update) a source's git history and rebuild its database."""
+    source = _resolve_source(name, config)
+    clone_path = _ensure_source_clone(source, since)
     if jobs == 1:
         with GitSource(clone_path) as src:
-            counts = run_extract(src, path, out, limit=limit)
+            counts = run_extract(src, source.file, source.db_dir, limit=limit)
     else:
         counts = build_parallel(
-            clone_path, path, out, jobs=(jobs or None),
+            clone_path, source.file, source.db_dir, jobs=(jobs or None),
             chunk_size=(chunk_size or None), limit=limit, progress=progress,
         )
     msg = (
-        f"[green]Built[/] {out} — {counts['commits']} commits, "
+        f"[green]Built[/] {source.db_dir} — {counts['commits']} commits, "
         f"{counts['snapshots']} snapshots, {counts['events']} events"
     )
     if counts.get("skipped"):
@@ -86,27 +288,83 @@ def build(
     console.print(msg + ".")
 
 
-def _ensure_clone(url: str, since: Optional[str], clone_dir: Path, repo: Optional[str]) -> str:
-    """Return a path to a local clone, cloning if necessary."""
-    if repo is not None:
-        console.print(f"Reading history from existing clone [cyan]{repo}[/].")
-        return repo
-    if clone_dir.exists():
+def _ensure_source_clone(source: SourceConfig, since: Optional[str]) -> str:
+    """Return the path to source's clone, cloning it (blob-filtered) if missing.
+
+    After the initial clone, we run ``git backfill --sparse`` scoped to the
+    source's OBO file. That pulls every historical blob of just that one file
+    in a single delta-packed transfer — much cheaper than the surprise
+    lazy-fetches ``git log --follow`` would otherwise trigger for rename
+    detection during the build. Backfill is idempotent, so it's cheap to call
+    again on a reused clone in case the source's file path changed.
+    """
+    if not source.clone_dir.exists():
+        bound = f", since {since}" if since else ""
         console.print(
-            f"Reusing clone at [cyan]{clone_dir}[/] "
+            f"Cloning [cyan]{source.repo}[/] (blob-filtered{bound}) → "
+            f"{source.clone_dir} …"
+        )
+        source.clone_dir.parent.mkdir(parents=True, exist_ok=True)
+        GitSource.clone(source.repo, source.clone_dir, since=since).close()
+    else:
+        console.print(
+            f"Reusing clone at [cyan]{source.clone_dir}[/] "
             "(delete it to re-clone with different bounds)."
         )
-        return str(clone_dir)
-    bound = f", since {since}" if since else ""
-    console.print(f"Cloning [cyan]{url}[/] (blob-filtered{bound}) → {clone_dir} …")
-    GitSource.clone(url, clone_dir, since=since).close()
-    return str(clone_dir)
+    console.print(
+        f"Backfilling blobs for [cyan]{source.file}[/] "
+        "(one delta-packed fetch of all historical versions) …"
+    )
+    GitSource(source.clone_dir).backfill_file(source.file)
+    # Server-side backfill packs are transfer-optimized, not size-optimized —
+    # a client-side repack often shrinks them ~5×. Nudge, don't force.
+    console.print(
+        f"[dim]Tip: [cyan]obohog source repack {source.name}[/] to reclaim "
+        "disk space on the clone.[/]"
+    )
+    return str(source.clone_dir)
+
+
+@source_app.command("repack")
+def source_repack(
+    name: str = typer.Argument(..., help="Source name (as declared in obohog.toml)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
+    window_memory: str = typer.Option(
+        "1g",
+        "--window-memory",
+        help=(
+            "Per-thread cap on pack-objects' delta search window "
+            "(git pack.windowMemory). Prevents SIGKILL on macOS for multi-GB "
+            "packs. Set to '0' to remove the cap (Linux-safe, macOS-risky)."
+        ),
+    ),
+):
+    """Consolidate a source's git object storage to reclaim disk space.
+
+    A fresh backfill of a large OBO file lands as a loosely-deltified pack —
+    for Mondo, ~10 GB. A client-side repack redeltas across the whole history
+    and typically shrinks it by ~5×. One-time cost; not required for
+    correctness.
+    """
+    source = _resolve_source(name, config)
+    if not source.clone_dir.exists():
+        console.print(f"[red]No clone at {source.clone_dir}. Run `obohog source sync {name}` first.[/]")
+        raise typer.Exit(1)
+    before = _dir_size(source.clone_dir / ".git")
+    console.print(f"Repacking [cyan]{source.clone_dir}[/] …")
+    GitSource(source.clone_dir).repack(window_memory=window_memory)
+    after = _dir_size(source.clone_dir / ".git")
+    console.print(
+        f"[green]Repacked[/] — {_fmt_size(before)} → {_fmt_size(after)} "
+        f"([yellow]saved {_fmt_size(before - after)}[/])."
+    )
 
 
 @app.command()
 def term(
     term_id: str = typer.Argument(..., help="e.g. MONDO:0007739"),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name (see obohog source list)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml (default: ./obohog.toml)."),
     only: Optional[str] = typer.Option(None, help="Restrict to one clause kind, e.g. synonym."),
     at: Optional[str] = typer.Option(
         None, help="Reconstruct state as of this ref (short sha, tag, or commit_seq)."
@@ -118,9 +376,13 @@ def term(
         None, help="Show only events at/after this ref (short sha, tag, or commit_seq)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
+    commits: bool = typer.Option(
+        False, "--commits",
+        help="For classic-merge PRs with a PR title, also list the PR-branch commits.",
+    ),
 ):
     """Show a term's change history, or its reconstructed state at a point."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     if at is not None:
         at_seq = db.resolve_ref(at)
         _render_state(term_id, at, db.term_at(term_id, at_seq))
@@ -130,7 +392,7 @@ def term(
         since_seq = db.resolve_ref(since) if since is not None else None
         _render_timeline(
             term_id, header, changes,
-            limit=limit, since_seq=since_seq, full=full,
+            limit=limit, since_seq=since_seq, full=full, show_commits=commits,
         )
     db.close()
 
@@ -138,30 +400,36 @@ def term(
 @app.command()
 def commit(
     sha: str = typer.Argument(..., help="Commit sha or unique prefix."),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     namespace: Optional[str] = typer.Option(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
+    commits: bool = typer.Option(
+        False, "--commits",
+        help="For classic-merge PRs with a PR title, also list the PR-branch commits.",
+    ),
 ):
     """Show what changed at one commit, structurally rendered per term."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     head, events = db.commit_events(sha, namespace=namespace)
     if head is None:
         console.print(f"[yellow]No indexed changes for commit[/] {sha}")
         db.close()
         return
-    _render_commit_view(head, events, full=full)
+    _render_commit_view(head, events, full=full, show_commits=commits)
     db.close()
 
 
 @app.command()
 def pr(
     number: int = typer.Argument(..., help="Pull request number, e.g. 10343."),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
 ):
     """List the terms changed by a pull request."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     terms = db.pr_terms(number)
     if not terms:
         console.print(f"[yellow]No indexed changes for PR[/] #{number}")
@@ -180,28 +448,34 @@ def pr(
 def diff(
     ref_a: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
     ref_b: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
     namespace: Optional[str] = typer.Option(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
+    commits: bool = typer.Option(
+        False, "--commits",
+        help="For classic-merge PRs with a PR title, also list the PR-branch commits.",
+    ),
 ):
     """Show clause changes between two points, grouped by term and commit."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     events = db.range_events(ref_a, ref_b, term_id=term, namespace=namespace)
     if not events:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
         return
-    _render_diff_view(ref_a, ref_b, events, full=full)
+    _render_diff_view(ref_a, ref_b, events, full=full, show_commits=commits)
     db.close()
 
 
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Substring (or regex, with --regex) to match in event values."),
-    artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
     predicate: Optional[str] = typer.Option(
         None, help="Restrict to one clause kind, e.g. xref."
@@ -217,9 +491,13 @@ def search(
         False, "--ignore-case", "-i", help="Case-insensitive match."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
+    commits: bool = typer.Option(
+        False, "--commits",
+        help="For classic-merge PRs with a PR title, also list the PR-branch commits.",
+    ),
 ):
     """Find commits that added or removed a clause matching QUERY."""
-    db = _open(artifact)
+    db = _open_source(source, config)
     since_seq = db.resolve_ref(since) if since is not None else None
     events = db.search_events(
         query, term_id=term, predicate=predicate, since_seq=since_seq,
@@ -229,14 +507,20 @@ def search(
         console.print(f'[yellow]No events matching[/] "{query}"')
         db.close()
         return
-    _render_search_view(query, events, regex=regex, ignore_case=ignore_case, full=full)
+    _render_search_view(
+        query, events, regex=regex, ignore_case=ignore_case, full=full,
+        show_commits=commits,
+    )
     db.close()
 
 
 @app.command()
-def releases(artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory.")):
-    """List release tags indexed in this artifact."""
-    db = _open(artifact)
+def releases(
+    source: str = typer.Option(..., "--source", help="Configured source name."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
+):
+    """List release tags indexed for a source."""
+    db = _open_source(source, config)
     rows = db.releases()
     db.close()
     if not rows:
@@ -256,6 +540,7 @@ def _render_timeline(
     limit: int | None = None,
     since_seq: int | None = None,
     full: bool = False,
+    show_commits: bool = False,
 ) -> None:
     if not changes:
         console.print(f"[yellow]No history for[/] {term_id}")
@@ -282,13 +567,7 @@ def _render_timeline(
         header_line.append(f"  {_date(head.committed_date)}  ")
         if head.author_name:
             header_line.append(f"{head.author_name}  ", style="cyan")
-        # Mondo commit messages end with `(#N)`, so a styled PR badge would
-        # duplicate what's already in the subject line. pr_number stays in
-        # the artifact for filtering; we just don't render it twice here.
-        header_line.append(head.message.splitlines()[0], style="dim")
-        console.print(header_line)
-        if head.pr_number is not None:
-            _print_pr_link(head.pr_number)
+        _render_commit_header(head, header_line, show_commits=show_commits)
         for op in render.pair_events(rows):
             console.print(render.render_op(op, truncate=cap))
 
@@ -349,7 +628,8 @@ def _render_header(
 
 
 def _render_commit_view(
-    head: Change, events: list[TermChange], full: bool = False
+    head: Change, events: list[TermChange], full: bool = False,
+    show_commits: bool = False,
 ) -> None:
     """Structural view of one commit: header + per-term event groups."""
     header_line = Text("● ")
@@ -357,10 +637,7 @@ def _render_commit_view(
     header_line.append(f"  {_date(head.committed_date)}  ")
     if head.author_name:
         header_line.append(f"{head.author_name}  ", style="cyan")
-    header_line.append(head.message.splitlines()[0], style="dim")
-    console.print(header_line)
-    if head.pr_number is not None:
-        _print_pr_link(head.pr_number)
+    _render_commit_header(head, header_line, show_commits=show_commits)
     n_terms = len({tc.term_id for tc in events})
     console.print(Text(f"{n_terms} terms changed", style="dim"))
 
@@ -378,7 +655,8 @@ def _render_commit_view(
 
 
 def _render_diff_view(
-    ref_a: str, ref_b: str, events: list[TermChange], full: bool = False
+    ref_a: str, ref_b: str, events: list[TermChange], full: bool = False,
+    show_commits: bool = False,
 ) -> None:
     """Structural view of a range diff: per-term sections, per-commit sub-groups."""
     n_terms = len({tc.term_id for tc in events})
@@ -391,7 +669,7 @@ def _render_diff_view(
     summary.append(f"{n_commits}", style="bold")
     summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
     console.print(summary)
-    _render_events_by_term_and_commit(events, full=full)
+    _render_events_by_term_and_commit(events, full=full, show_commits=show_commits)
 
 
 def _render_search_view(
@@ -400,6 +678,7 @@ def _render_search_view(
     regex: bool = False,
     ignore_case: bool = False,
     full: bool = False,
+    show_commits: bool = False,
 ) -> None:
     """Structural view of search hits: same layout as the diff view.
 
@@ -410,7 +689,7 @@ def _render_search_view(
     "the change" by definition, so the SQL match already tells us the query
     is in the changed portion.
 
-    See :func:`mondo_history.render.edit_delta_matches` for the exact rule.
+    See :func:`obohog.render.edit_delta_matches` for the exact rule.
     """
     events = _filter_events_by_delta_match(events, query, regex, ignore_case)
     if not events:
@@ -428,7 +707,7 @@ def _render_search_view(
     summary.append(f"{n_commits}", style="bold")
     summary.append(" commits", style="dim")
     console.print(summary)
-    _render_events_by_term_and_commit(events, full=full)
+    _render_events_by_term_and_commit(events, full=full, show_commits=show_commits)
 
 
 def _filter_events_by_delta_match(
@@ -437,7 +716,7 @@ def _filter_events_by_delta_match(
     """Drop paired-edit event pairs whose delta doesn't contain the query.
 
     Pairs events per commit, drops both halves of any ``Edit`` whose
-    :func:`~mondo_history.render.edit_delta_matches` returns False, and
+    :func:`~obohog.render.edit_delta_matches` returns False, and
     keeps every unpaired ``Add`` / ``Remove`` as-is. Preserves the input
     order at the (term_id, commit_seq) granularity so the downstream
     ``groupby`` in :func:`_render_events_by_term_and_commit` still sees
@@ -463,7 +742,7 @@ def _filter_events_by_delta_match(
 
 
 def _render_events_by_term_and_commit(
-    events: list[TermChange], full: bool = False
+    events: list[TermChange], full: bool = False, show_commits: bool = False
 ) -> None:
     """Group ``events`` by term, then by commit within each term, and render.
 
@@ -491,10 +770,7 @@ def _render_events_by_term_and_commit(
             commit_header.append(f"  {_date(head.committed_date)}  ")
             if head.author_name:
                 commit_header.append(f"{head.author_name}  ", style="cyan")
-            commit_header.append(head.message.splitlines()[0], style="dim")
-            console.print(commit_header)
-            if head.pr_number is not None:
-                _print_pr_link(head.pr_number)
+            _render_commit_header(head, commit_header, show_commits=show_commits)
             changes = [tc.change for tc in commit_rows]
             for op in render.pair_events(changes):
                 console.print(render.render_op(op, truncate=cap))

@@ -15,6 +15,31 @@ class ArtifactNotFound(Exception):
     """Raised when an artifact directory lacks the core history tables."""
 
 
+def _wrap_branch_commits(raw) -> tuple["BranchCommit", ...]:
+    """Convert a duckdb list<struct> result into a tuple of BranchCommit."""
+    if not raw:
+        return ()
+    return tuple(
+        BranchCommit(
+            sha=entry["sha"],
+            author_name=entry["author_name"],
+            committed_date=entry["committed_date"],
+            message=entry["message"],
+        )
+        for entry in raw
+    )
+
+
+@dataclass(frozen=True)
+class BranchCommit:
+    """One commit on the merged branch of a merge commit (typically a PR)."""
+
+    sha: str
+    author_name: str
+    committed_date: object
+    message: str
+
+
 @dataclass(frozen=True)
 class Change:
     """One clause add/remove, joined to the commit that made it."""
@@ -28,6 +53,7 @@ class Change:
     operation: str
     predicate: str
     value: str
+    branch_commits: tuple[BranchCommit, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,7 +95,7 @@ class HistoryDB:
         if absent:
             raise ArtifactNotFound(
                 f"No history artifact at '{self.dir}' (missing: {', '.join(absent)}). "
-                "Run `mondo-history build` first, or pass --artifact <dir>."
+                "Run `obohog build` first, or pass --artifact <dir>."
             )
         self.con = duckdb.connect(":memory:")
         for name in ("commits", "term_snapshots", "events", "releases", "skipped"):
@@ -102,7 +128,8 @@ class HistoryDB:
             f"""
             SELECT c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
-                   e.operation, e.predicate, e.value
+                   e.operation, e.predicate, e.value,
+                   c.branch_commits
             FROM events e
             JOIN commits c USING (commit_seq)
             WHERE {where}
@@ -110,7 +137,10 @@ class HistoryDB:
             """,
             params,
         ).fetchall()
-        return [Change(*row) for row in rows]
+        return [
+            Change(*row[:9], branch_commits=_wrap_branch_commits(row[9]))
+            for row in rows
+        ]
 
     def term_header(self, term_id: str) -> TermHeader | None:
         """Orientation stats for the term, or ``None`` if it has no events."""
@@ -175,20 +205,25 @@ class HistoryDB:
         empty placeholders — the CLI uses it purely for the ``sha/date/PR/message``
         header). ``events`` is ordered by ``(term_id, operation, predicate, value)``
         so ``groupby(events, key=term_id)`` gives per-term event lists directly
-        consumable by :func:`mondo_history.render.pair_events`. Optionally
+        consumable by :func:`obohog.render.pair_events`. Optionally
         restricted to term IDs with a given CURIE prefix via ``namespace``.
 
         Returns ``(None, [])`` when no commit matches the sha prefix.
         """
         row = self.con.execute(
-            """SELECT commit_seq, sha, author_name, committed_date, pr_number, message
+            """SELECT commit_seq, sha, author_name, committed_date, pr_number,
+                      message, branch_commits
                FROM commits WHERE sha LIKE ? || '%' ORDER BY commit_seq LIMIT 1""",
             [sha_prefix],
         ).fetchone()
         if row is None:
             return None, []
-        commit_seq, sha, author, date, pr, message = row
-        head = Change(commit_seq, date, sha, author, pr, message, "", "", "")
+        commit_seq, sha, author, date, pr, message, raw_bc = row
+        branch_commits = _wrap_branch_commits(raw_bc)
+        head = Change(
+            commit_seq, date, sha, author, pr, message, "", "", "",
+            branch_commits=branch_commits,
+        )
 
         where = "e.commit_seq = ?"
         params: list[object] = [commit_seq]
@@ -211,7 +246,8 @@ class HistoryDB:
                 term_id=term_id,
                 name=name,
                 change=Change(
-                    commit_seq, date, sha, author, pr, message, op, pred, val
+                    commit_seq, date, sha, author, pr, message, op, pred, val,
+                    branch_commits=branch_commits,
                 ),
             )
             for term_id, name, op, pred, val in rows
@@ -283,7 +319,8 @@ class HistoryDB:
             SELECT e.term_id, s.name,
                    c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
-                   e.operation, e.predicate, e.value
+                   e.operation, e.predicate, e.value,
+                   c.branch_commits
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
@@ -298,10 +335,11 @@ class HistoryDB:
                 term_id=term_id,
                 name=name,
                 change=Change(
-                    seq, date, sha, author, pr, message, op, pred, val
+                    seq, date, sha, author, pr, message, op, pred, val,
+                    branch_commits=_wrap_branch_commits(bc),
                 ),
             )
-            for term_id, name, seq, date, sha, author, pr, message, op, pred, val in rows
+            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc in rows
         ]
 
     def search_events(
@@ -368,7 +406,8 @@ class HistoryDB:
             SELECT e.term_id, s.name,
                    c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
-                   e.operation, e.predicate, e.value
+                   e.operation, e.predicate, e.value,
+                   c.branch_commits
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
@@ -383,10 +422,11 @@ class HistoryDB:
                 term_id=term_id,
                 name=name,
                 change=Change(
-                    seq, date, sha, author, pr, message, op, pred, val
+                    seq, date, sha, author, pr, message, op, pred, val,
+                    branch_commits=_wrap_branch_commits(bc),
                 ),
             )
-            for term_id, name, seq, date, sha, author, pr, message, op, pred, val in rows
+            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc in rows
         ]
 
     def releases(self) -> list[tuple[str, int, object]]:

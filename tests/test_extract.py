@@ -5,9 +5,9 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from mondo_history.extract import build_parallel, extract
-from mondo_history.gitsource import GitSource
-from mondo_history.query import ArtifactNotFound, HistoryDB
+from obohog.extract import build_parallel, extract
+from obohog.gitsource import GitSource
+from obohog.query import ArtifactNotFound, HistoryDB
 
 OBO = "src/onto.obo"
 
@@ -89,7 +89,7 @@ def test_removing_an_unparseable_term_does_not_crash(bad_then_removed_repo: Path
 
 
 def test_missing_artifact_raises_clear_error(tmp_path: Path):
-    with pytest.raises(ArtifactNotFound, match="Run `mondo-history build`"):
+    with pytest.raises(ArtifactNotFound, match="Run `obohog build`"):
         HistoryDB(tmp_path / "does-not-exist")
 
 
@@ -98,11 +98,11 @@ def test_term_events_are_clause_deltas(artifact: Path):
     kinds = [(c.operation, c.predicate) for c in db.term_timeline("MONDO:0000001")]
     db.close()
 
-    # synonym added at c1, xref added at c3.
+    # name added at c0 (birth of the term — ∅ → full clause set is a valid
+    # diff), synonym added at c1, xref added at c3.
+    assert ("add", "name") in kinds
     assert ("add", "synonym") in kinds
     assert ("add", "xref") in kinds
-    # The baseline 'name: disease' predates the window, so it is NOT an event.
-    assert ("add", "name") not in kinds
 
 
 def test_pure_rename_emits_no_events(artifact: Path):
@@ -142,6 +142,25 @@ def test_pr_number_parsed_from_message(artifact: Path):
         "WHERE message LIKE 'c2%'"
     ).fetchone()[0]
     assert pr == 42
+
+
+def test_pr_number_handles_both_github_conventions():
+    from obohog.extract import _extract_pr_number
+
+    # Squash-and-merge (post-2023 Mondo): title ends with "(#N)".
+    assert _extract_pr_number("add venom terms (#10409)") == 10409
+    # Classic merge commit (pre-2023 Mondo, PATO): "Merge pull request #N …"
+    # The merge pattern must anchor to start-of-message so a PR body that
+    # mentions "Merge pull request #x" in prose doesn't false-positive.
+    assert _extract_pr_number(
+        "Merge pull request #5013 from monarch-initiative/issue-4938"
+    ) == 5013
+    # No PR referenced.
+    assert _extract_pr_number("misc fixes") is None
+    # Body that quotes another PR in parens shouldn't win over the merge header.
+    assert _extract_pr_number(
+        "Merge pull request #123 from user/branch\n\nRelates to (#456)"
+    ) == 123
 
 
 def test_releases_map_tag_to_commit(artifact: Path):

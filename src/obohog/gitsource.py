@@ -28,6 +28,16 @@ _NULL_OID = "0" * 40
 
 
 @dataclass(frozen=True)
+class BranchCommit:
+    """One commit on the merged branch of a merge commit (typically a PR)."""
+
+    sha: str
+    author_name: str
+    committed_date: datetime  # timezone-aware
+    message: str
+
+
+@dataclass(frozen=True)
 class CommitInfo:
     """Git metadata for one commit that touched the followed file."""
 
@@ -38,6 +48,7 @@ class CommitInfo:
     committed_date: datetime  # timezone-aware
     parent_sha: str | None  # first parent, or None at a root commit
     message: str
+    branch_commits: tuple["BranchCommit", ...] = ()  # newest-first, empty for non-merges
 
 
 @dataclass(frozen=True)
@@ -115,15 +126,69 @@ class GitSource:
         _run(cmd, cwd=None)
         return cls(dest)
 
+    def backfill_file(self, path: str) -> None:
+        """Pre-fetch every historical blob of ``path`` in one delta-packed pass.
+
+        A ``--filter=blob:none`` clone starts with zero blob content. Even a
+        plain ``git log --follow -- <path>`` needs blob content for rename
+        detection, so an on-demand lazy-fetch happens sooner than one might
+        expect. Rather than let git make thousands of tiny fetches during the
+        build, we set the sparse-checkout to just ``path`` and call
+        ``git backfill --sparse``, which asks the promisor remote for every
+        blob that is currently missing under the sparse pattern in one batched
+        delta-packed transfer. Idempotent — subsequent runs are near-free.
+
+        The backfill can take minutes on a large repo; stderr is left connected
+        to the caller so git's own transfer progress ("Receiving objects: 42%
+        (1234/2938)") streams to the terminal live. Sparse-checkout setup is
+        instantaneous and stays captured.
+        """
+        _run(["git", "sparse-checkout", "init"], cwd=self.repo_dir)
+        _run(["git", "sparse-checkout", "set", path], cwd=self.repo_dir)
+        _run_streaming(["git", "backfill", "--sparse"], cwd=self.repo_dir)
+
+    def repack(self, *, window_memory: str = "1g") -> None:
+        """Consolidate and re-deltify object storage to reclaim disk space.
+
+        Server-side promisor packs are optimized for transfer speed, not size —
+        a fresh backfill of a large OBO file can land as a loosely-deltified
+        multi-GB pack that shrinks by ~5× after client-side redelta. This is
+        pure disk-space cost/benefit; the clone works fine either way, so
+        callers must opt in explicitly.
+
+        ``window_memory`` caps each pack-objects thread's delta search window
+        (``pack.windowMemory``). Without a cap, redeltifying a multi-GB pack
+        of large OBO blobs will get SIGKILL'd by macOS on memory pressure
+        even with plenty of physical RAM free (Linux tolerates it via mmap
+        eviction). The default ``"1g"`` is generous enough that OBO-shaped
+        near-sequential edits still delta well. Pass ``"0"`` to remove the
+        cap. Everything else uses git defaults.
+        """
+        _run_streaming(
+            [
+                "git",
+                "-c", f"pack.windowMemory={window_memory}",
+                "repack", "-a", "-d", "-f",
+            ],
+            cwd=self.repo_dir,
+        )
+
     def iter_file_history(self, path: str) -> Iterator[FileVersion]:
         """Yield every version of ``path``, oldest first, following renames.
 
         ``--follow`` tracks the file across renames, so ``path`` need only be its
         *current* location; each yielded :class:`FileVersion` reports the path as
         it was at that commit. Commits that delete the file are skipped.
+
+        Branch commits for each merge are resolved via per-merge
+        ``git log first_parent..second_parent`` (the semantics we want),
+        cached by (first_parent, second_parent) so repeated identical pairs
+        pay only once. The heavier cost of that subprocess is contained to
+        the parent process — workers receive the pre-computed versions list.
         """
         commits = self._read_commits(path)
         blobs = self._read_blob_refs(path)  # sha -> (path, blob_oid) at that commit
+        branch_cache: dict[tuple[str, str], tuple[BranchCommit, ...]] = {}
 
         seq = 0
         for commit in commits:
@@ -135,6 +200,14 @@ class GitSource:
             at_path, blob_oid = ref
             if blob_oid == _NULL_OID:
                 continue  # file removed at this commit; nothing to snapshot
+            branch_commits: tuple[BranchCommit, ...] = ()
+            if commit.parent_sha and commit.second_parent_sha:
+                key = (commit.parent_sha, commit.second_parent_sha)
+                cached = branch_cache.get(key)
+                if cached is None:
+                    cached = self._read_branch_commits(*key)
+                    branch_cache[key] = cached
+                branch_commits = cached
             yield FileVersion(
                 commit=CommitInfo(
                     seq=seq,
@@ -144,6 +217,7 @@ class GitSource:
                     committed_date=commit.committed_date,
                     parent_sha=commit.parent_sha,
                     message=commit.message,
+                    branch_commits=branch_commits,
                 ),
                 path=at_path,
                 blob_oid=blob_oid,
@@ -190,7 +264,19 @@ class GitSource:
     # -- internals -------------------------------------------------------
 
     def _read_commits(self, path: str) -> list["_RawCommit"]:
-        """Ordered commit metadata for every commit touching ``path``.
+        """Ordered commit metadata for every mainline commit touching ``path``.
+
+        Uses ``--first-parent`` so the sequence is genuinely linear: each
+        commit's predecessor in the returned list is its git first-parent, and
+        the diff between adjacent commits is what a curator saw land on main.
+
+        Without ``--first-parent``, ``git log --follow`` returns every commit
+        touching the file across every branch, interleaved chronologically.
+        Diffing adjacent commits then compares state on unrelated branches
+        (their common ancestor may be many commits back), producing phantom
+        "changes" that don't reflect any real edit. That was the source of the
+        weird edit cycles on paired events: the walk zig-zagged between
+        branch state and mainline state, and each hop looked like a change.
 
         The body (``%B``) is the last field and no path/diff output follows it,
         so multi-line messages parse unambiguously against the separators.
@@ -204,6 +290,7 @@ class GitSource:
                 "git",
                 "log",
                 "--follow",
+                "--first-parent",
                 f"--format={fmt}",
                 "--",
                 path,
@@ -216,18 +303,65 @@ class GitSource:
             if not record:
                 continue
             sha, an, ae, adate, parents, message = record.split(_FIELD)
+            parts = parents.split(" ") if parents else []
             commits.append(
                 _RawCommit(
                     sha=sha,
                     author_name=an,
                     author_email=ae,
                     committed_date=datetime.fromisoformat(adate),
-                    parent_sha=parents.split(" ")[0] if parents else None,
+                    parent_sha=parts[0] if parts else None,
+                    second_parent_sha=parts[1] if len(parts) > 1 else None,
                     message=message.strip(),
                 )
             )
         commits.reverse()  # oldest first
         return commits
+
+    def _read_branch_commits(
+        self, first_parent: str, second_parent: str
+    ) -> tuple["BranchCommit", ...]:
+        """Commits reachable from ``second_parent`` but not from ``first_parent``.
+
+        These are the individual commits that landed as part of a merge — for
+        a GitHub-merged PR, the PR-branch commits in the order they'll be
+        listed on the PR page. Returned newest-first so the tip (typically the
+        one with the most descriptive final message) is prominent.
+
+        Delegates the reachability computation to git (``a..b`` semantics) —
+        computing it in memory got tangled up on cross-branch merges (a PR
+        whose branch itself merged main into it), which have PR-branch
+        commits reachable through the merged-in tip that aren't on the
+        first-parent chain from the tip.
+        """
+        fmt = _FIELD.join(["%H", "%an", "%aI", "%s"]) + _RECORD
+        try:
+            out = _run(
+                [
+                    "git", "log",
+                    "--no-merges",
+                    f"--format={fmt}",
+                    f"{first_parent}..{second_parent}",
+                ],
+                cwd=self.repo_dir,
+            )
+        except GitError:
+            return ()
+        result: list[BranchCommit] = []
+        for record in out.split(_RECORD):
+            record = record.strip("\n")
+            if not record:
+                continue
+            sha, an, adate, subject = record.split(_FIELD)
+            result.append(
+                BranchCommit(
+                    sha=sha,
+                    author_name=an,
+                    committed_date=datetime.fromisoformat(adate),
+                    message=subject,
+                )
+            )
+        return tuple(result)
 
     def _read_blob_refs(self, path: str) -> dict[str, tuple[str, str]]:
         """Map each commit sha to (path_at_commit, blob_oid) via ``--raw``.
@@ -237,12 +371,15 @@ class GitSource:
         path. The path is still captured for reporting.
         """
         # Newest-first (see _read_commits); order is irrelevant here since the
-        # result is keyed by sha.
+        # result is keyed by sha. `--first-parent` matches _read_commits so we
+        # don't accidentally return blobs for commits that _read_commits
+        # (correctly) omitted.
         out = _run(
             [
                 "git",
                 "log",
                 "--follow",
+                "--first-parent",
                 "--raw",
                 "--no-abbrev",
                 f"--format={_RECORD}%H",
@@ -277,6 +414,7 @@ class _RawCommit:
     author_email: str
     committed_date: datetime
     parent_sha: str | None
+    second_parent_sha: str | None  # set when this is a merge (2+ parents)
     message: str
 
 
@@ -320,3 +458,19 @@ def _run(cmd: list[str], cwd: Path | None) -> str:
     if result.returncode != 0:
         raise GitError(f"{' '.join(cmd)} failed:\n{result.stderr}")
     return result.stdout
+
+
+def _run_streaming(cmd: list[str], cwd: Path | None) -> None:
+    """Run a git command with stderr inherited so the user sees its progress.
+
+    Used for long-running operations like ``git backfill --sparse`` where
+    git's own transfer-progress output (`Receiving objects: 42% (…)`) is
+    much more informative than a "please wait" spinner from us. Stdout
+    stays captured so it doesn't interleave with the rest of the CLI's
+    rich rendering (backfill's stdout is empty on success anyway).
+    """
+    result = subprocess.run(
+        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=None, text=True,
+    )
+    if result.returncode != 0:
+        raise GitError(f"{' '.join(cmd)} failed with exit code {result.returncode}")

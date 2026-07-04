@@ -1,0 +1,22 @@
+# obohog configuration.
+#
+# Copy this to `obohog.toml` and adjust to declare the OBO ontologies you
+# want to track. Any git-hosted OBO file is fair game.
+
+# Root directory for local clones and databases. Optional (defaults to ./data).
+storage = "./data"
+
+# One [source.<name>] table per ontology.
+# `name` is what you'll pass as --source on the CLI.
+
+[source.mondo]
+repo = "https://github.com/monarch-initiative/mondo"
+file = "src/ontology/mondo-edit.obo"
+
+[source.pato]
+repo = "https://github.com/pato-ontology/pato"
+file = "src/ontology/pato-edit.obo"
+
+# Optional per-source overrides:
+#   clone_dir = "/some/other/place"   # default: {storage}/{name}/clone
+#   db_dir    = "/some/other/place"   # default: {storage}/{name}/db
