@@ -231,7 +231,48 @@ def _ensure_source_clone(source: SourceConfig, since: Optional[str]) -> str:
         "(one delta-packed fetch of all historical versions) …"
     )
     GitSource(source.clone_dir).backfill_file(source.file)
+    # Server-side backfill packs are transfer-optimized, not size-optimized —
+    # a client-side repack often shrinks them ~5×. Nudge, don't force.
+    console.print(
+        f"[dim]Tip: [cyan]obohist source repack {source.name}[/] to reclaim "
+        "disk space on the clone.[/]"
+    )
     return str(source.clone_dir)
+
+
+@source_app.command("repack")
+def source_repack(
+    name: str = typer.Argument(..., help="Source name (as declared in obohist.toml)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+    window_memory: str = typer.Option(
+        "1g",
+        "--window-memory",
+        help=(
+            "Per-thread cap on pack-objects' delta search window "
+            "(git pack.windowMemory). Prevents SIGKILL on macOS for multi-GB "
+            "packs. Set to '0' to remove the cap (Linux-safe, macOS-risky)."
+        ),
+    ),
+):
+    """Consolidate a source's git object storage to reclaim disk space.
+
+    A fresh backfill of a large OBO file lands as a loosely-deltified pack —
+    for Mondo, ~10 GB. A client-side repack redeltas across the whole history
+    and typically shrinks it by ~5×. One-time cost; not required for
+    correctness.
+    """
+    source = _resolve_source(name, config)
+    if not source.clone_dir.exists():
+        console.print(f"[red]No clone at {source.clone_dir}. Run `obohist source sync {name}` first.[/]")
+        raise typer.Exit(1)
+    before = _dir_size(source.clone_dir / ".git")
+    console.print(f"Repacking [cyan]{source.clone_dir}[/] …")
+    GitSource(source.clone_dir).repack(window_memory=window_memory)
+    after = _dir_size(source.clone_dir / ".git")
+    console.print(
+        f"[green]Repacked[/] — {_fmt_size(before)} → {_fmt_size(after)} "
+        f"([yellow]saved {_fmt_size(before - after)}[/])."
+    )
 
 
 @app.command()

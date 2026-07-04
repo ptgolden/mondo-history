@@ -147,6 +147,32 @@ class GitSource:
         _run(["git", "sparse-checkout", "set", path], cwd=self.repo_dir)
         _run_streaming(["git", "backfill", "--sparse"], cwd=self.repo_dir)
 
+    def repack(self, *, window_memory: str = "1g") -> None:
+        """Consolidate and re-deltify object storage to reclaim disk space.
+
+        Server-side promisor packs are optimized for transfer speed, not size —
+        a fresh backfill of a large OBO file can land as a loosely-deltified
+        multi-GB pack that shrinks by ~5× after client-side redelta. This is
+        pure disk-space cost/benefit; the clone works fine either way, so
+        callers must opt in explicitly.
+
+        ``window_memory`` caps each pack-objects thread's delta search window
+        (``pack.windowMemory``). Without a cap, redeltifying a multi-GB pack
+        of large OBO blobs will get SIGKILL'd by macOS on memory pressure
+        even with plenty of physical RAM free (Linux tolerates it via mmap
+        eviction). The default ``"1g"`` is generous enough that OBO-shaped
+        near-sequential edits still delta well. Pass ``"0"`` to remove the
+        cap. Everything else uses git defaults.
+        """
+        _run_streaming(
+            [
+                "git",
+                "-c", f"pack.windowMemory={window_memory}",
+                "repack", "-a", "-d", "-f",
+            ],
+            cwd=self.repo_dir,
+        )
+
     def iter_file_history(self, path: str) -> Iterator[FileVersion]:
         """Yield every version of ``path``, oldest first, following renames.
 
