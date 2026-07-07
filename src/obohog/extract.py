@@ -47,6 +47,10 @@ _FLUSH_EVERY = 200
 # that quote other PRs.
 _PR_MERGE = re.compile(r"^Merge pull request #(\d+) from ")
 _PR_SQUASH = re.compile(r"\(#(\d+)\)")
+# Release-based providers stash the snapshot's canonical URL as a trailer
+# in the commit message body ("Release URL: <url>"). Parsed out here so the
+# render layer can link back without needing per-source-type wiring.
+_SNAPSHOT_URL = re.compile(r"^Release URL: (\S+)", re.MULTILINE)
 _EMPTY: tuple[Clause, ...] = ()
 
 
@@ -58,6 +62,11 @@ def _extract_pr_number(message: str) -> int | None:
     if m:
         return int(m.group(1))
     return None
+
+
+def _extract_snapshot_url(message: str) -> str | None:
+    m = _SNAPSHOT_URL.search(message)
+    return m.group(1) if m else None
 
 
 def extract(
@@ -170,6 +179,13 @@ def _release_rows(
 
 
 def _commit_row(commit: CommitInfo) -> dict:
+    snapshot_url = _extract_snapshot_url(commit.message)
+    # Release-based commits carry the release page URL as their identity;
+    # any `(#N)` or `Merge pull request #N` in the release body is just an
+    # incidental reference, not a claim about which PR produced this
+    # snapshot. Suppress pr_number on those commits so `obohog pr <N>`
+    # doesn't attribute release terms to unrelated PRs.
+    pr_number = None if snapshot_url else _extract_pr_number(commit.message)
     return {
         "commit_seq": commit.seq,
         "sha": commit.sha,
@@ -177,7 +193,7 @@ def _commit_row(commit: CommitInfo) -> dict:
         "author_email": commit.author_email,
         "committed_date": commit.committed_date.astimezone(timezone.utc).replace(tzinfo=None),
         "message": commit.message,
-        "pr_number": _extract_pr_number(commit.message),
+        "pr_number": pr_number,
         "parent_sha": commit.parent_sha,
         "branch_commits": [
             {
@@ -188,6 +204,7 @@ def _commit_row(commit: CommitInfo) -> dict:
             }
             for bc in commit.branch_commits
         ],
+        "snapshot_url": snapshot_url,
     }
 
 

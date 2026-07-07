@@ -1,22 +1,42 @@
 # obohog configuration.
 #
 # Copy this to `obohog.toml` and adjust to declare the OBO ontologies you
-# want to track. Any git-hosted OBO file is fair game.
+# want to track.
 
 # Root directory for local clones and databases. Optional (defaults to ./data).
 storage = "./data"
 
 # One [source.<name>] table per ontology.
 # `name` is what you'll pass as --source on the CLI.
+# `type` selects the history-acquisition strategy; see below.
 
+# ---- type = "git-file" ----
+# The ontology's edit file lives in a git repo. Every commit that touched
+# `file` is one snapshot in the indexed history. Best when the repo's own
+# commits capture curator intent (e.g. ODK-style workflows).
 [source.mondo]
+type = "git-file"
 repo = "https://github.com/monarch-initiative/mondo"
 file = "src/ontology/mondo-edit.obo"
 
 [source.pato]
+type = "git-file"
 repo = "https://github.com/pato-ontology/pato"
 file = "src/ontology/pato-edit.obo"
 
-# Optional per-source overrides:
+# ---- type = "github-release" ----
+# The ontology is published as GitHub Releases. obohog fetches each release,
+# materializes it into a synthetic git commit (author = release publisher,
+# date = published_at, tag = release tag, message body includes the release
+# URL), and then indexes the resulting history the same way as any git-file
+# source. Best when the released artifact is downstream of imports /
+# template generation / reasoning that the edit file's commits don't
+# capture. `asset` is the release-asset filename to fetch.
+[source.zp]
+type = "github-release"
+repo = "https://github.com/obophenotype/zebrafish-phenotype-ontology"
+asset = "zp-base.obo"
+
+# Optional per-source overrides (any type):
 #   clone_dir = "/some/other/place"   # default: {storage}/{name}/clone
 #   db_dir    = "/some/other/place"   # default: {storage}/{name}/db

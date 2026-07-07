@@ -44,6 +44,11 @@ COMMITS = pa.schema(
         ("pr_number", pa.int32()),  # nullable
         ("parent_sha", pa.string()),  # nullable
         ("branch_commits", pa.list_(_BRANCH_COMMIT)),
+        # External URL for the snapshot this commit represents. Populated
+        # by release-based providers (e.g. GitHubReleaseProvider stashes the
+        # release page URL). NULL for git-file sources, where "the URL" is
+        # nominally the commit page but we don't invent one.
+        ("snapshot_url", pa.string()),  # nullable
     ]
 )
 
