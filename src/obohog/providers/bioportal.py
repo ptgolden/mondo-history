@@ -26,14 +26,12 @@ are skipped. If the ontology publishes zero OBO submissions, the sync
 errors out rather than producing an empty artifact.
 """
 
-import json
 import re
 import shutil
 import tempfile
-import urllib.error
-import urllib.request
 from pathlib import Path
 
+import requests
 from rich.console import Console
 
 from ..config import BioPortalSource, ConfigError
@@ -168,8 +166,11 @@ def _require_api_key() -> str:
     return key
 
 
-def _auth_headers(api_key: str) -> dict[str, str]:
-    return {"Authorization": f"apikey token={api_key}"}
+def _session(api_key: str) -> requests.Session:
+    """Requests session pre-configured with BioPortal auth."""
+    session = requests.Session()
+    session.headers["Authorization"] = f"apikey token={api_key}"
+    return session
 
 
 def _list_submissions(acronym: str, api_key: str) -> list[dict]:
@@ -185,13 +186,14 @@ def _list_submissions(acronym: str, api_key: str) -> list[dict]:
         "submissionId,version,released,creationDate,hasOntologyLanguage,"
         "description,contact"
     )
-    url = (
+    url: str | None = (
         f"{_API_BASE}/ontologies/{acronym}/submissions"
         f"?display={display}&pagesize=200"
     )
+    session = _session(api_key)
     out: list[dict] = []
     while url:
-        payload = _get_json(url, api_key)
+        payload = _get_json(session, url)
         if isinstance(payload, list):
             out.extend(payload)
             url = None
@@ -206,20 +208,17 @@ def _list_submissions(acronym: str, api_key: str) -> list[dict]:
     return out
 
 
-def _get_json(url: str, api_key: str) -> object:
-    """GET a JSON URL with BioPortal auth. Translates 401/403 into a
-    friendly ConfigError so users know exactly what went wrong."""
-    req = urllib.request.Request(url, headers=_auth_headers(api_key))
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as err:
-        if err.code in (401, 403):
-            raise ConfigError(
-                f"BioPortal rejected the API key (HTTP {err.code}). "
-                "Check BIOPORTAL_API_KEY in .env."
-            )
-        raise
+def _get_json(session: requests.Session, url: str) -> object:
+    """GET a JSON URL. Translates 401/403 into a friendly ConfigError so
+    users know exactly what went wrong."""
+    resp = session.get(url)
+    if resp.status_code in (401, 403):
+        raise ConfigError(
+            f"BioPortal rejected the API key (HTTP {resp.status_code}). "
+            "Check BIOPORTAL_API_KEY in .env."
+        )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _download_obo(
@@ -233,9 +232,10 @@ def _download_obo(
     )
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{acronym}.obo"
-    req = urllib.request.Request(url, headers=_auth_headers(api_key))
-    with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
-        shutil.copyfileobj(resp, f)
+    with _session(api_key).get(url, stream=True) as resp:
+        resp.raise_for_status()
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(resp.raw, f)
     return dest
 
 
