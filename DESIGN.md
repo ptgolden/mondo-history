@@ -59,19 +59,31 @@ Chosen stack:
   S3) with **no server** — clients fetch only the byte ranges they need.
 - Optionally emit a convenience single-file `.duckdb` later; Parquet stays primitive.
 
-### 3. History acquisition: build our own, scoped to one file
-- Every configured source gets a fresh blob-filtered clone under
-  `{storage}/{name}/clone`. Don't reuse an unrelated shallow snapshot the user
-  might have around; a shallow clone doesn't have the history depth this
-  needs.
-- Do a `git clone --filter=blob:none --no-checkout` of the source repo: full
-  commit graph + trees, **no blob contents** until requested. Then walk
-  `git log --follow --reverse -- <config-declared-file>` and lazily
-  `git cat-file` **only that one file's blobs** across history. So we only
-  ever download the history of the declared OBO file, not the rest of the
-  repo. Reproducible from a URL.
-- The source URL and file path come from `obohog.toml` and are recorded in
-  the built `build_meta`.
+### 3. History acquisition: providers materialize a git repo, extract walks it
+- Every configured source declares a `type` in `obohog.toml`. Two types today:
+  `git-file` (the source's own git history is the history we index) and
+  `github-release` (published releases are the history we index). Both
+  produce a git repo at `{storage}/{name}/clone`; the extract pipeline
+  walks that repo identically regardless of type. Adding a source type
+  means writing one provider module, not touching extract/query/render.
+- **`git-file`** — do a `git clone --filter=blob:none --no-checkout` of the
+  source repo: full commit graph + trees, **no blob contents** until
+  requested. Then walk `git log --follow --reverse -- <config-declared-file>`
+  and lazily `git cat-file` **only that one file's blobs** across history.
+  We only ever download the history of the declared OBO file, not the rest
+  of the repo. Reproducible from a URL.
+- **`github-release`** — enumerate releases via `gh api`, download the
+  configured `asset` from each with `gh release download`, and commit the
+  asset into a synthetic git repo (`git init` at first sync). Each release
+  becomes one commit: `author` = release publisher, `date` = `published_at`,
+  message body carries a `Release URL: <html_url>` trailer that the
+  extractor parses back out into `snapshot_url`. The commit is git-tagged
+  with the release tag. Renderers link to the release page via
+  `snapshot_url`. Non-goal: reconstructing which PR touched which term —
+  release notes often link PRs but there's no reliable machinery to
+  attribute term changes to specific PRs.
+- The source URL and configured fields come from `obohog.toml` and are
+  recorded in the built `build_meta`.
 
 ---
 
@@ -80,7 +92,10 @@ Chosen stack:
 - **`commits`** — one row per commit touching the OBO file:
   `commit_seq` (monotonic linear index, oldest=0), `sha`, `author_name`,
   `author_email`, `committed_date`, `message`, `pr_number` (nullable, parsed from
-  message), `parent_sha`.
+  message), `parent_sha`, `branch_commits` (nullable list of PR-branch commits
+  for merges), `snapshot_url` (nullable — populated for release-based sources
+  with the release page URL, parsed from a `Release URL:` trailer in the
+  commit message body).
 - **`releases`** — release tags mapped to commits: `tag`, `sha`, `date`, `commit_seq`.
   Enables "what changed between two releases".
 - **`term_snapshots`** — one row per (term, commit-where-it-changed):
@@ -203,16 +218,20 @@ DESIGN.md                     # this document
 PLAN.md                       # original vision
 README.md                     # quick start
 obohog.toml.example          # example config; user copies to obohog.toml
-pyproject.toml                # deps: fastobo, duckdb, pyarrow, typer, rich, tqdm
+pyproject.toml                # deps: fastobo, duckdb, pyarrow, typer, rich, tqdm, pydantic
 src/obohog/
-  config.py                   # obohog.toml loading + Source resolution
-  extract.py                  # git walk + fastobo parse + diff → Parquet
-  gitsource.py                # blobless clone / repo acquisition, log --follow
+  config.py                   # obohog.toml loading + Source resolution (pydantic discriminated union)
+  extract.py                  # walks the clone, parses OBO, writes Parquet
+  gitsource.py                # blobless clone / rename-aware log walk / cat-file blob reader
   obo.py                      # frame normalization, canonical clause set, hashing
   model.py                    # Parquet schemas / table writers
   query.py                    # DuckDB query helpers (shared by CLI + API)
   render.py                   # structural word-diff, pairing, delta search
   cli.py                      # command-line entry point (source subcommand + query commands)
+  providers/
+    __init__.py               # get_provider(source, console) → Provider dispatcher
+    git_file.py               # GitFileProvider: blob-filtered clone + backfill
+    github_release.py         # GitHubReleaseProvider: materialize releases via `gh` into a synthetic git repo
 tests/
   fixtures/                   # tiny multi-commit OBO git repo for deterministic tests
 

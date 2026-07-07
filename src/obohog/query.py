@@ -54,6 +54,7 @@ class Change:
     predicate: str
     value: str
     branch_commits: tuple[BranchCommit, ...] = ()
+    snapshot_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,12 +103,29 @@ class HistoryDB:
             source = self._source(name)
             if source is None:
                 continue  # table absent (single-file artifact, or older schema)
-            # read_parquet needs a literal path (CREATE VIEW can't bind params);
-            # escape single quotes in the path we control.
-            literal = source.replace("'", "''")
-            self.con.execute(
-                f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{literal}')"
-            )
+            self._create_view(name, source)
+
+    def _create_view(self, name: str, source: str) -> None:
+        """Create a DuckDB view over the parquet path ``source``.
+
+        Older artifacts predate the ``snapshot_url`` column on ``commits``;
+        wrap them so callers can always ``SELECT c.snapshot_url`` without
+        branching. Add-on columns projected here should always be nullable.
+        """
+        # read_parquet needs a literal path (CREATE VIEW can't bind params);
+        # escape single quotes in the path we control.
+        literal = source.replace("'", "''")
+        self.con.execute(
+            f"CREATE VIEW {name}_raw AS SELECT * FROM read_parquet('{literal}')"
+        )
+        cols = {row[1] for row in self.con.execute(f"PRAGMA table_info('{name}_raw')").fetchall()}
+        projections = [f"*"]
+        if name == "commits" and "snapshot_url" not in cols:
+            projections.append("CAST(NULL AS VARCHAR) AS snapshot_url")
+        select_list = ", ".join(projections)
+        self.con.execute(
+            f"CREATE VIEW {name} AS SELECT {select_list} FROM {name}_raw"
+        )
 
     def _source(self, name: str) -> str | None:
         """Resolve a table to a read_parquet path: part-file dir glob or single file."""
@@ -129,7 +147,7 @@ class HistoryDB:
             SELECT c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value,
-                   c.branch_commits
+                   c.branch_commits, c.snapshot_url
             FROM events e
             JOIN commits c USING (commit_seq)
             WHERE {where}
@@ -138,7 +156,11 @@ class HistoryDB:
             params,
         ).fetchall()
         return [
-            Change(*row[:9], branch_commits=_wrap_branch_commits(row[9]))
+            Change(
+                *row[:9],
+                branch_commits=_wrap_branch_commits(row[9]),
+                snapshot_url=row[10],
+            )
             for row in rows
         ]
 
@@ -212,17 +234,18 @@ class HistoryDB:
         """
         row = self.con.execute(
             """SELECT commit_seq, sha, author_name, committed_date, pr_number,
-                      message, branch_commits
+                      message, branch_commits, snapshot_url
                FROM commits WHERE sha LIKE ? || '%' ORDER BY commit_seq LIMIT 1""",
             [sha_prefix],
         ).fetchone()
         if row is None:
             return None, []
-        commit_seq, sha, author, date, pr, message, raw_bc = row
+        commit_seq, sha, author, date, pr, message, raw_bc, snapshot_url = row
         branch_commits = _wrap_branch_commits(raw_bc)
         head = Change(
             commit_seq, date, sha, author, pr, message, "", "", "",
             branch_commits=branch_commits,
+            snapshot_url=snapshot_url,
         )
 
         where = "e.commit_seq = ?"
@@ -248,6 +271,7 @@ class HistoryDB:
                 change=Change(
                     commit_seq, date, sha, author, pr, message, op, pred, val,
                     branch_commits=branch_commits,
+                    snapshot_url=snapshot_url,
                 ),
             )
             for term_id, name, op, pred, val in rows
@@ -320,7 +344,7 @@ class HistoryDB:
                    c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value,
-                   c.branch_commits
+                   c.branch_commits, c.snapshot_url
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
@@ -337,9 +361,10 @@ class HistoryDB:
                 change=Change(
                     seq, date, sha, author, pr, message, op, pred, val,
                     branch_commits=_wrap_branch_commits(bc),
+                    snapshot_url=snapshot_url,
                 ),
             )
-            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc in rows
+            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc, snapshot_url in rows
         ]
 
     def search_events(
@@ -407,7 +432,7 @@ class HistoryDB:
                    c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value,
-                   c.branch_commits
+                   c.branch_commits, c.snapshot_url
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
@@ -424,9 +449,10 @@ class HistoryDB:
                 change=Change(
                     seq, date, sha, author, pr, message, op, pred, val,
                     branch_commits=_wrap_branch_commits(bc),
+                    snapshot_url=snapshot_url,
                 ),
             )
-            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc in rows
+            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc, snapshot_url in rows
         ]
 
     def releases(self) -> list[tuple[str, int, object]]:
