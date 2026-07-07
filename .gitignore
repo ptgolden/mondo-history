@@ -16,6 +16,11 @@ NOTES.md
 # User-local config (only the .example is committed)
 /obohog.toml
 
+# API keys and other secrets
+/.env
+/.env.*
+!/.env.example
+
 # Editor / OS
 .DS_Store
 *.swp

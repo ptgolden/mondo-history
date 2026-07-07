@@ -6,6 +6,7 @@ inspects the resulting synthetic git repo to confirm the commit graph
 matches the release sequence.
 """
 
+import contextlib
 import json
 import subprocess
 from pathlib import Path
@@ -16,6 +17,19 @@ from rich.console import Console
 
 from obohog.config import GitHubReleaseSource
 from obohog.providers.github_release import GitHubReleaseProvider
+
+
+@contextlib.contextmanager
+def _patch_subprocess(side_effect):
+    """Patch subprocess.run in both modules that call out to gh/git.
+
+    Kept as one wrapper so tests don't have to remember every module
+    that shells out — the intent is "intercept subprocess in the
+    provider machinery", not "patch a specific module".
+    """
+    with patch("obohog.providers.github_release.subprocess.run", side_effect=side_effect), \
+         patch("obohog.providers._synthetic_git.subprocess.run", side_effect=side_effect):
+        yield
 
 
 def _source(clone_dir: Path) -> GitHubReleaseSource:
@@ -109,7 +123,7 @@ def test_materializes_releases_in_oldest_first_order(tmp_path: Path):
     }
 
     provider = GitHubReleaseProvider(Console(quiet=True))
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(releases, asset_bytes)):
+    with _patch_subprocess(_fake_gh(releases, asset_bytes)):
         returned = provider.ensure_synced(src)
 
     assert Path(returned) == clone_dir
@@ -141,7 +155,7 @@ def test_skips_drafts_prereleases_and_missing_assets(tmp_path: Path):
     }
 
     provider = GitHubReleaseProvider(Console(quiet=True))
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(releases, asset_bytes)):
+    with _patch_subprocess(_fake_gh(releases, asset_bytes)):
         provider.ensure_synced(src)
 
     log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
@@ -160,11 +174,11 @@ def test_incremental_sync_only_commits_new_releases(tmp_path: Path):
     }
 
     provider = GitHubReleaseProvider(Console(quiet=True))
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(initial, asset_bytes)):
+    with _patch_subprocess(_fake_gh(initial, asset_bytes)):
         provider.ensure_synced(src)
     assert _run_git("log", "--format=%s", cwd=clone_dir).splitlines() == ["v1.0"]
 
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(later, asset_bytes)):
+    with _patch_subprocess(_fake_gh(later, asset_bytes)):
         provider.ensure_synced(src)
     # v1.0 is not re-committed; only v2.0 lands as a new commit.
     log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
@@ -185,7 +199,7 @@ def test_rolling_tag_shares_a_commit(tmp_path: Path):
     asset_bytes = {"v1.0": same_bytes, "current": same_bytes}
 
     provider = GitHubReleaseProvider(Console(quiet=True))
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(releases, asset_bytes)):
+    with _patch_subprocess(_fake_gh(releases, asset_bytes)):
         provider.ensure_synced(src)
 
     # Exactly one commit lands (for v1.0's actual content).
@@ -209,3 +223,315 @@ def test_non_github_repo_url_raises(tmp_path: Path):
     provider = GitHubReleaseProvider(Console(quiet=True))
     with pytest.raises(ValueError, match="github.com"):
         provider.ensure_synced(src)
+
+
+# ---------------------------------------------------------------------------
+# BioPortalProvider tests
+# ---------------------------------------------------------------------------
+
+import io  # noqa: E402
+import re  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+from obohog.config import BioPortalSource, ConfigError  # noqa: E402
+from obohog.providers.bioportal import BioPortalProvider  # noqa: E402
+
+
+def _bioportal_source(clone_dir: Path, acronym: str = "FAKE") -> BioPortalSource:
+    return BioPortalSource(
+        name=acronym.lower(),
+        acronym=acronym,
+        clone_dir=clone_dir,
+        db_dir=clone_dir.parent / "db",
+    )
+
+
+def _submission(
+    submission_id: int,
+    version: str | None,
+    released: str,
+    creation_date: str | None = None,
+    *,
+    language: str = "OBO",
+    contact_name: str = "A. Curator",
+    contact_email: str = "a@example.org",
+) -> dict:
+    return {
+        "submissionId": submission_id,
+        "version": version,
+        "released": released,
+        "creationDate": creation_date or released,
+        "hasOntologyLanguage": language,
+        "description": "",
+        "contact": [{"name": contact_name, "email": contact_email}],
+    }
+
+
+def _fake_response(*, status: int = 200, json_body=None, raw_bytes: bytes = b""):
+    """A ``requests.Response``-shaped MagicMock for use in test fakes."""
+    resp = MagicMock()
+    resp.status_code = status
+    resp.raise_for_status = MagicMock()
+    if status >= 400:
+        resp.raise_for_status.side_effect = requests.HTTPError(f"status {status}")
+    if json_body is not None:
+        resp.json.return_value = json_body
+    resp.raw = io.BytesIO(raw_bytes)
+    resp.__enter__ = lambda self: self
+    resp.__exit__ = lambda self, *a: False
+    return resp
+
+
+@contextmanager
+def _fake_bioportal(
+    submissions: list[dict],
+    obo_bytes_by_id: dict[int, bytes],
+    *,
+    api_key: str | None = "test-key",
+):
+    """Patch the requests session BioPortalProvider uses.
+
+    ``settings.get_settings`` is monkeypatched to return the given API
+    key (or None to simulate a missing key).
+    """
+    def fake_session_get(session_self, url, *args, **kwargs):
+        if "/submissions?" in url:
+            return _fake_response(json_body=submissions)
+        m = re.search(r"/submissions/(\d+)/download", url)
+        if m:
+            sub_id = int(m.group(1))
+            return _fake_response(raw_bytes=obo_bytes_by_id.get(sub_id, b""))
+        raise AssertionError(f"unexpected GET: {url}")
+
+    fake_settings = MagicMock()
+    fake_settings.bioportal_api_key = api_key
+
+    import requests as _requests
+    with patch.object(_requests.Session, "get", new=fake_session_get), \
+         patch("obohog.providers.bioportal.get_settings", return_value=fake_settings), \
+         patch("obohog.providers._synthetic_git.subprocess.run", side_effect=subprocess.run):
+        yield
+
+
+# Add missing import for `requests` module used in _fake_response.
+import requests  # noqa: E402
+
+
+def test_bioportal_materializes_oldest_first_and_tags(tmp_path: Path):
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    submissions = [
+        # Deliberately out of order to prove we sort by picked date.
+        _submission(3, "v3.0", "2024-09-01T00:00:00Z"),
+        _submission(1, "v1.0", "2024-01-01T00:00:00Z"),
+        _submission(2, "v2.0", "2024-05-01T00:00:00Z"),
+    ]
+    obo_bytes = {
+        1: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: one\n",
+        2: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: uno\n",
+        3: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: uno\n[Term]\nid: FAKE:2\nname: two\n",
+    }
+    provider = BioPortalProvider(Console(quiet=True))
+    with _fake_bioportal(submissions, obo_bytes):
+        provider.ensure_synced(src)
+
+    log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
+    assert log == ["v1.0", "v2.0", "v3.0"]
+    tags = set(_run_git("tag", "--list", cwd=clone_dir).splitlines())
+    assert tags == {"v1.0", "v2.0", "v3.0"}
+
+
+def test_bioportal_skips_non_obo_submissions(tmp_path: Path):
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    submissions = [
+        _submission(1, "v1.0", "2024-01-01T00:00:00Z"),
+        _submission(2, "v2.0-owl", "2024-02-01T00:00:00Z", language="OWL"),
+        _submission(3, "v2.0", "2024-03-01T00:00:00Z"),
+    ]
+    obo_bytes = {
+        1: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: one\n",
+        3: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: uno\n",
+    }
+    provider = BioPortalProvider(Console(quiet=True))
+    with _fake_bioportal(submissions, obo_bytes):
+        provider.ensure_synced(src)
+
+    log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
+    # OWL submission dropped; only the two OBO ones landed.
+    assert log == ["v1.0", "v2.0"]
+
+
+def test_bioportal_fails_when_no_obo_submissions(tmp_path: Path):
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "OWLY")
+    submissions = [
+        _submission(1, "v1.0", "2024-01-01T00:00:00Z", language="OWL"),
+        _submission(2, "v2.0", "2024-05-01T00:00:00Z", language="RDF/XML"),
+    ]
+    provider = BioPortalProvider(Console(quiet=True))
+    with _fake_bioportal(submissions, obo_bytes_by_id={}):
+        with pytest.raises(ConfigError, match="no OBO-format submissions"):
+            provider.ensure_synced(src)
+
+
+def test_bioportal_empty_version_falls_back_to_sub_id(tmp_path: Path):
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    submissions = [
+        _submission(7, None, "2024-01-01T00:00:00Z"),
+        _submission(8, "", "2024-02-01T00:00:00Z"),
+        _submission(9, "bad:tag", "2024-03-01T00:00:00Z"),  # colons aren't valid ref names
+        # BioPortal literally uses the string "unknown" as a placeholder
+        # for missing version metadata (see ZFA submissions #19-30). It
+        # should behave the same as null / empty: each submission gets
+        # its own sub-<id> tag rather than collapsing them all.
+        _submission(10, "unknown", "2024-04-01T00:00:00Z"),
+        _submission(11, "UNKNOWN", "2024-05-01T00:00:00Z"),  # case-insensitive
+    ]
+    obo_bytes = {
+        7: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: a\n",
+        8: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: b\n",
+        9: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: c\n",
+        10: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: d\n",
+        11: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: e\n",
+    }
+    provider = BioPortalProvider(Console(quiet=True))
+    with _fake_bioportal(submissions, obo_bytes):
+        provider.ensure_synced(src)
+
+    tags = set(_run_git("tag", "--list", cwd=clone_dir).splitlines())
+    assert tags == {"sub-7", "sub-8", "sub-9", "sub-10", "sub-11"}
+
+
+def test_bioportal_rolling_submission_shares_a_commit(tmp_path: Path):
+    """Byte-identical OBO downloads share a commit with the previous
+    submission (same rolling-tag path the github-release provider uses)."""
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    submissions = [
+        _submission(1, "v1.0", "2024-01-01T00:00:00Z"),
+        _submission(2, "v1.0-rerun", "2024-02-01T00:00:00Z"),
+    ]
+    identical = b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: one\n"
+    obo_bytes = {1: identical, 2: identical}
+    provider = BioPortalProvider(Console(quiet=True))
+    with _fake_bioportal(submissions, obo_bytes):
+        provider.ensure_synced(src)
+
+    log = _run_git("log", "--format=%s", cwd=clone_dir).splitlines()
+    assert log == ["v1.0"]
+    v1_sha = _run_git("rev-parse", "v1.0", cwd=clone_dir)
+    rerun_sha = _run_git("rev-parse", "v1.0-rerun", cwd=clone_dir)
+    assert v1_sha == rerun_sha
+
+
+def test_bioportal_skips_mislabeled_non_obo_download(tmp_path: Path):
+    """BioPortal's per-submission metadata sometimes claims OBO for content
+    that was actually uploaded in a different format (ODT, docx). The
+    provider should log a skip rather than commit garbage."""
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    submissions = [
+        _submission(1, "sub-1", "2015-01-01T00:00:00Z"),
+        _submission(2, "v1.0", "2016-01-01T00:00:00Z"),
+    ]
+    obo_bytes = {
+        # Submission 1: metadata claims OBO but bytes are actually an ODT
+        # zip container. Should be skipped.
+        1: b"PK\x03\x04garbage",
+        # Submission 2: real OBO. Should commit.
+        2: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: uno\n",
+    }
+    provider = BioPortalProvider(Console(quiet=True))
+    with _fake_bioportal(submissions, obo_bytes):
+        provider.ensure_synced(src)
+
+    log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
+    assert log == ["v1.0"]
+
+
+def test_bioportal_dedupes_duplicate_version_within_batch(tmp_path: Path):
+    """BioPortal sometimes lists many submissions with the same `version`
+    string (e.g. ZFA re-processing `releases/2018-12-25` a dozen times).
+    We should only commit the first one and skip the rest without hitting
+    the download endpoint — otherwise the second `git tag <same>` crashes.
+    """
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    submissions = [
+        _submission(50, "releases/2018-12-19", "2019-06-12T00:00:00Z"),
+        _submission(51, "releases/2018-12-25", "2019-06-18T00:00:00Z"),
+        _submission(52, "releases/2018-12-19", "2019-06-19T00:00:00Z"),  # dup
+        _submission(53, "releases/2018-12-25", "2019-06-25T00:00:00Z"),  # dup
+        _submission(54, "releases/2018-12-19", "2019-07-06T00:00:00Z"),  # dup
+    ]
+    obo_bytes = {
+        50: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: a\n",
+        51: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: b\n",
+        # 52-54 asset bytes never fetched because we dedupe by tag first
+    }
+    provider = BioPortalProvider(Console(quiet=True))
+    calls: list[str] = []
+
+    def tracking_fake_session_get(session_self, url, *args, **kwargs):
+        calls.append(url)
+        if "/submissions?" in url:
+            return _fake_response(json_body=submissions)
+        m = re.search(r"/submissions/(\d+)/download", url)
+        if m:
+            sub_id = int(m.group(1))
+            # Fail loudly if we hit download for a dup — the whole point
+            # of the dedup is not to.
+            if sub_id not in obo_bytes:
+                raise AssertionError(
+                    f"unexpected download for duplicate-version submission {sub_id}"
+                )
+            return _fake_response(raw_bytes=obo_bytes[sub_id])
+        raise AssertionError(f"unexpected GET: {url}")
+
+    fake_settings = MagicMock()
+    fake_settings.bioportal_api_key = "test-key"
+    with patch.object(requests.Session, "get", new=tracking_fake_session_get), \
+         patch("obohog.providers.bioportal.get_settings", return_value=fake_settings), \
+         patch("obohog.providers._synthetic_git.subprocess.run", side_effect=subprocess.run):
+        provider.ensure_synced(src)
+
+    # Only two commits: one per unique version, oldest first.
+    log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
+    assert log == ["releases/2018-12-19", "releases/2018-12-25"]
+    tags = set(_run_git("tag", "--list", cwd=clone_dir).splitlines())
+    assert tags == {"releases/2018-12-19", "releases/2018-12-25"}
+    # The submissions endpoint was hit once; only the two kept submissions'
+    # downloads were fetched (dup submissions never touched the API).
+    download_hits = [u for u in calls if "/download" in u]
+    assert len(download_hits) == 2
+
+
+def test_bioportal_incremental_sync(tmp_path: Path):
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    first = [_submission(1, "v1.0", "2024-01-01T00:00:00Z")]
+    later = first + [_submission(2, "v2.0", "2024-06-01T00:00:00Z")]
+    obo_bytes = {
+        1: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: a\n",
+        2: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: b\n",
+    }
+    provider = BioPortalProvider(Console(quiet=True))
+    with _fake_bioportal(first, obo_bytes):
+        provider.ensure_synced(src)
+    with _fake_bioportal(later, obo_bytes):
+        provider.ensure_synced(src)
+
+    log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
+    assert log == ["v1.0", "v2.0"]
+
+
+def test_bioportal_missing_api_key_raises_config_error(tmp_path: Path):
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    provider = BioPortalProvider(Console(quiet=True))
+    with _fake_bioportal([], obo_bytes_by_id={}, api_key=None):
+        with pytest.raises(ConfigError, match="BIOPORTAL_API_KEY"):
+            provider.ensure_synced(src)

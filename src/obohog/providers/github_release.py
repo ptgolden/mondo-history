@@ -26,6 +26,7 @@ retries for us. No auth/token surface to invent.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -35,6 +36,12 @@ from pathlib import Path
 from rich.console import Console
 
 from ..config import GitHubReleaseSource
+from ._synthetic_git import (
+    commit_or_tag_head,
+    git_init,
+    list_local_tags,
+    run_git,
+)
 
 
 _GITHUB_HTTPS = re.compile(r"^https?://github\.com/([^/]+/[^/]+?)(?:\.git)?/?$")
@@ -76,13 +83,13 @@ class GitHubReleaseProvider:
                 f"Initializing synthetic clone at [cyan]{clone_dir}[/] "
                 f"for release-backed source [cyan]{source.name}[/] …"
             )
-            self._git_init(clone_dir)
+            git_init(clone_dir)
             local_tags: set[str] = set()
         else:
             self.console.print(
                 f"Reusing clone at [cyan]{clone_dir}[/]."
             )
-            local_tags = self._list_local_tags(clone_dir)
+            local_tags = list_local_tags(clone_dir)
 
         self.console.print(
             f"Fetching release list from [cyan]{owner_name}[/] …"
@@ -156,22 +163,6 @@ class GitHubReleaseProvider:
         )
         return dest_dir / asset_name
 
-    def _git_init(self, clone_dir: Path) -> None:
-        clone_dir.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            ["git", "init", "--initial-branch=main", "--quiet", str(clone_dir)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            raise GitCommandError(
-                ("init", str(clone_dir)),
-                result.returncode, result.stdout, result.stderr,
-            )
-
-    def _list_local_tags(self, clone_dir: Path) -> set[str]:
-        stdout = _git(clone_dir, "tag", "--list")
-        return {line.strip() for line in stdout.splitlines() if line.strip()}
-
     def _materialize_release(
         self,
         source: GitHubReleaseSource,
@@ -191,50 +182,16 @@ class GitHubReleaseProvider:
             dest = clone_dir / source.asset
             shutil.copy(downloaded, dest)
 
-        _git(clone_dir, "add", source.asset)
-
-        # Rolling tags (like "current" pointing at the same asset as the
-        # previous release) leave the working tree clean after `git add`.
-        # `git commit` would fail on the empty diff; tag whatever commit
-        # HEAD points to instead so incremental sync knows we've seen it.
-        if self._nothing_to_commit(clone_dir):
-            self.console.print(
-                f"  [dim]· {tag} matches previous release content; "
-                "tagging existing commit instead of adding an empty one[/]"
-            )
-            head_sha = _head_sha(clone_dir)
-            if head_sha:
-                _git(clone_dir, "tag", tag, head_sha)
-            # If there's no HEAD yet (very first release we've tried was
-            # already-seen against something outside our repo, which can
-            # only happen if two releases in a row have empty diff on the
-            # first sync), silently drop it — the tag alone has no useful
-            # history to attach to.
-            return
-
-        env = {
-            # Isolate from the user's real ~/.gitconfig so authorship comes
-            # only from what we pass in.
-            "GIT_AUTHOR_NAME": _release_author_name(release),
-            "GIT_AUTHOR_EMAIL": _release_author_email(release),
-            "GIT_COMMITTER_NAME": _release_author_name(release),
-            "GIT_COMMITTER_EMAIL": _release_author_email(release),
-            "GIT_AUTHOR_DATE": release["published_at"],
-            "GIT_COMMITTER_DATE": release["published_at"],
-            "PATH": _system_path(),
-        }
-        message = _commit_message_for(release)
-        _git(clone_dir, "commit", "--quiet", "-m", message, env=env)
-        _git(clone_dir, "tag", tag)
-
-    def _nothing_to_commit(self, clone_dir: Path) -> bool:
-        """True if `git add` staged no changes vs. the current HEAD."""
-        result = subprocess.run(
-            ["git", "-C", str(clone_dir), "diff", "--cached", "--quiet"],
-            env={"PATH": _system_path()},
+        run_git(clone_dir, "add", source.asset)
+        commit_or_tag_head(
+            clone_dir,
+            tag,
+            author_name=_release_author_name(release),
+            author_email=_release_author_email(release),
+            committed_date=release["published_at"],
+            message=_commit_message_for(release),
+            console=self.console,
         )
-        # `diff --quiet` exits 0 for no diff, 1 for diff, >1 for real errors.
-        return result.returncode == 0
 
 
 def _release_author_name(release: dict) -> str:
@@ -270,52 +227,9 @@ def _commit_message_for(release: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _system_path() -> str:
-    """Preserve PATH so subprocess.run finds `git` when we override env."""
-    import os
-
-    return os.environ.get("PATH", "")
-
-
 def _gh_env() -> dict:
     """PATH + tokens gh needs, minus the update-check chatter that would
     otherwise leak into our output."""
-    import os
-
     env = dict(os.environ)
     env["GH_NO_UPDATE_NOTIFIER"] = "1"
     return env
-
-
-def _git(clone_dir: Path, *args: str, env: dict | None = None) -> str:
-    """Run a git subcommand in ``clone_dir``, capture its output, and return
-    stdout on success. Raises ``GitCommandError`` if git exits non-zero,
-    surfacing captured stderr so failures aren't silent.
-    """
-    result = subprocess.run(
-        ["git", "-C", str(clone_dir), *args],
-        capture_output=True, text=True, env=env,
-    )
-    if result.returncode != 0:
-        raise GitCommandError(args, result.returncode, result.stdout, result.stderr)
-    return result.stdout
-
-
-def _head_sha(clone_dir: Path) -> str | None:
-    """The current HEAD sha, or ``None`` if the repo has no commits yet."""
-    result = subprocess.run(
-        ["git", "-C", str(clone_dir), "rev-parse", "--verify", "HEAD"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
-
-
-class GitCommandError(RuntimeError):
-    def __init__(self, args: tuple, returncode: int, stdout: str, stderr: str):
-        super().__init__(
-            f"git {' '.join(args)} failed (exit {returncode})\n"
-            f"stdout: {stdout.strip()}\n"
-            f"stderr: {stderr.strip()}"
-        )
