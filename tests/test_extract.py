@@ -163,6 +163,55 @@ def test_pr_number_handles_both_github_conventions():
     ) == 123
 
 
+def test_snapshot_url_extracted_from_release_trailer():
+    from obohog.extract import _extract_snapshot_url
+
+    # GitHubReleaseProvider stashes the release page URL on its own trailer line.
+    msg = (
+        "v2024.03.01\n\n"
+        "Release notes body here.\n\n"
+        "Release URL: https://github.com/obophenotype/zp/releases/tag/v2024.03.01"
+    )
+    assert (
+        _extract_snapshot_url(msg)
+        == "https://github.com/obophenotype/zp/releases/tag/v2024.03.01"
+    )
+    # A message without the trailer → None (git-file sources).
+    assert _extract_snapshot_url("add venom terms (#10409)") is None
+    # The trailer must be at the start of a line — a URL embedded inside prose
+    # doesn't count.
+    assert _extract_snapshot_url("See Release URL: https://x/y for context") is None
+
+
+def test_snapshot_url_suppresses_pr_number():
+    """Release-based commits shouldn't attribute PR numbers to release bodies.
+
+    ``_commit_row`` in extract.py checks snapshot_url before pr_number, so
+    a `(#123)` in release notes doesn't leak into `pr_number`. Verified via
+    the row builder directly since the fixture obo_repo is git-file-only.
+    """
+    from datetime import datetime, timezone
+    from obohog.extract import _commit_row
+    from obohog.gitsource import CommitInfo
+
+    commit = CommitInfo(
+        seq=5,
+        sha="a" * 40,
+        author_name="bot",
+        author_email="bot@example.com",
+        committed_date=datetime(2024, 3, 1, tzinfo=timezone.utc),
+        message=(
+            "v2024.03.01\n\n"
+            "Merged (#123) and (#456) into this release.\n\n"
+            "Release URL: https://github.com/x/y/releases/tag/v2024.03.01"
+        ),
+        parent_sha="b" * 40,
+    )
+    row = _commit_row(commit)
+    assert row["snapshot_url"] == "https://github.com/x/y/releases/tag/v2024.03.01"
+    assert row["pr_number"] is None  # suppressed by snapshot_url presence
+
+
 def test_releases_map_tag_to_commit(artifact: Path):
     db = HistoryDB(artifact)
     rels = db.releases()
