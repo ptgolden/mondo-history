@@ -444,6 +444,63 @@ def test_bioportal_skips_mislabeled_non_obo_download(tmp_path: Path):
     assert log == ["v1.0"]
 
 
+def test_bioportal_dedupes_duplicate_version_within_batch(tmp_path: Path):
+    """BioPortal sometimes lists many submissions with the same `version`
+    string (e.g. ZFA re-processing `releases/2018-12-25` a dozen times).
+    We should only commit the first one and skip the rest without hitting
+    the download endpoint — otherwise the second `git tag <same>` crashes.
+    """
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    submissions = [
+        _submission(50, "releases/2018-12-19", "2019-06-12T00:00:00Z"),
+        _submission(51, "releases/2018-12-25", "2019-06-18T00:00:00Z"),
+        _submission(52, "releases/2018-12-19", "2019-06-19T00:00:00Z"),  # dup
+        _submission(53, "releases/2018-12-25", "2019-06-25T00:00:00Z"),  # dup
+        _submission(54, "releases/2018-12-19", "2019-07-06T00:00:00Z"),  # dup
+    ]
+    obo_bytes = {
+        50: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: a\n",
+        51: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: b\n",
+        # 52-54 asset bytes never fetched because we dedupe by tag first
+    }
+    provider = BioPortalProvider(Console(quiet=True))
+    calls: list[str] = []
+
+    def tracking_fake_session_get(session_self, url, *args, **kwargs):
+        calls.append(url)
+        if "/submissions?" in url:
+            return _fake_response(json_body=submissions)
+        m = re.search(r"/submissions/(\d+)/download", url)
+        if m:
+            sub_id = int(m.group(1))
+            # Fail loudly if we hit download for a dup — the whole point
+            # of the dedup is not to.
+            if sub_id not in obo_bytes:
+                raise AssertionError(
+                    f"unexpected download for duplicate-version submission {sub_id}"
+                )
+            return _fake_response(raw_bytes=obo_bytes[sub_id])
+        raise AssertionError(f"unexpected GET: {url}")
+
+    fake_settings = MagicMock()
+    fake_settings.bioportal_api_key = "test-key"
+    with patch.object(requests.Session, "get", new=tracking_fake_session_get), \
+         patch("obohog.providers.bioportal.get_settings", return_value=fake_settings), \
+         patch("obohog.providers._synthetic_git.subprocess.run", side_effect=subprocess.run):
+        provider.ensure_synced(src)
+
+    # Only two commits: one per unique version, oldest first.
+    log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
+    assert log == ["releases/2018-12-19", "releases/2018-12-25"]
+    tags = set(_run_git("tag", "--list", cwd=clone_dir).splitlines())
+    assert tags == {"releases/2018-12-19", "releases/2018-12-25"}
+    # The submissions endpoint was hit once; only the two kept submissions'
+    # downloads were fetched (dup submissions never touched the API).
+    download_hits = [u for u in calls if "/download" in u]
+    assert len(download_hits) == 2
+
+
 def test_bioportal_incremental_sync(tmp_path: Path):
     clone_dir = tmp_path / "clone"
     src = _bioportal_source(clone_dir, "FAKE")

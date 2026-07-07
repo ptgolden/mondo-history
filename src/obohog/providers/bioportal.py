@@ -106,8 +106,34 @@ class BioPortalProvider:
             s["_picked_date"] = _pick_date(s)
         obo_only.sort(key=lambda s: s["_picked_date"])
 
-        # Skip anything already tagged locally.
-        new_subs = [s for s in obo_only if _tag_for(s) not in local_tags]
+        # Dedupe. Two ways a submission gets filtered here:
+        #
+        # 1. Its tag is already committed from a previous sync (idempotency).
+        #    Silent skip — expected on every re-run.
+        # 2. Its tag matches an earlier submission in this same batch. That
+        #    means BioPortal re-processed the same released tarball without
+        #    bumping ``version`` (ZFA does this a lot: runs of a dozen
+        #    submissions all tagged ``releases/YYYY-MM-DD``). Skip and log
+        #    so the user sees how many redundant API hits were avoided.
+        seen = set(local_tags)
+        new_subs: list[dict] = []
+        dup_in_batch = 0
+        for s in obo_only:
+            tag = _tag_for(s)
+            if tag in local_tags:
+                continue
+            if tag in seen:
+                dup_in_batch += 1
+                continue
+            new_subs.append(s)
+            seen.add(tag)
+
+        if dup_in_batch:
+            self.console.print(
+                f"[dim]Skipping {dup_in_batch} duplicate-version "
+                "submission(s) (BioPortal re-processed a release without "
+                "bumping the version string).[/]"
+            )
 
         if not new_subs:
             self.console.print(
