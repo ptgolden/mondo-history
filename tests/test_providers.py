@@ -6,6 +6,7 @@ inspects the resulting synthetic git repo to confirm the commit graph
 matches the release sequence.
 """
 
+import contextlib
 import json
 import subprocess
 from pathlib import Path
@@ -16,6 +17,19 @@ from rich.console import Console
 
 from obohog.config import GitHubReleaseSource
 from obohog.providers.github_release import GitHubReleaseProvider
+
+
+@contextlib.contextmanager
+def _patch_subprocess(side_effect):
+    """Patch subprocess.run in both modules that call out to gh/git.
+
+    Kept as one wrapper so tests don't have to remember every module
+    that shells out — the intent is "intercept subprocess in the
+    provider machinery", not "patch a specific module".
+    """
+    with patch("obohog.providers.github_release.subprocess.run", side_effect=side_effect), \
+         patch("obohog.providers._synthetic_git.subprocess.run", side_effect=side_effect):
+        yield
 
 
 def _source(clone_dir: Path) -> GitHubReleaseSource:
@@ -109,7 +123,7 @@ def test_materializes_releases_in_oldest_first_order(tmp_path: Path):
     }
 
     provider = GitHubReleaseProvider(Console(quiet=True))
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(releases, asset_bytes)):
+    with _patch_subprocess(_fake_gh(releases, asset_bytes)):
         returned = provider.ensure_synced(src)
 
     assert Path(returned) == clone_dir
@@ -141,7 +155,7 @@ def test_skips_drafts_prereleases_and_missing_assets(tmp_path: Path):
     }
 
     provider = GitHubReleaseProvider(Console(quiet=True))
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(releases, asset_bytes)):
+    with _patch_subprocess(_fake_gh(releases, asset_bytes)):
         provider.ensure_synced(src)
 
     log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
@@ -160,11 +174,11 @@ def test_incremental_sync_only_commits_new_releases(tmp_path: Path):
     }
 
     provider = GitHubReleaseProvider(Console(quiet=True))
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(initial, asset_bytes)):
+    with _patch_subprocess(_fake_gh(initial, asset_bytes)):
         provider.ensure_synced(src)
     assert _run_git("log", "--format=%s", cwd=clone_dir).splitlines() == ["v1.0"]
 
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(later, asset_bytes)):
+    with _patch_subprocess(_fake_gh(later, asset_bytes)):
         provider.ensure_synced(src)
     # v1.0 is not re-committed; only v2.0 lands as a new commit.
     log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
@@ -185,7 +199,7 @@ def test_rolling_tag_shares_a_commit(tmp_path: Path):
     asset_bytes = {"v1.0": same_bytes, "current": same_bytes}
 
     provider = GitHubReleaseProvider(Console(quiet=True))
-    with patch("obohog.providers.github_release.subprocess.run", side_effect=_fake_gh(releases, asset_bytes)):
+    with _patch_subprocess(_fake_gh(releases, asset_bytes)):
         provider.ensure_synced(src)
 
     # Exactly one commit lands (for v1.0's actual content).
